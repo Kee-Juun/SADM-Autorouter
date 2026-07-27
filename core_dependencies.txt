@@ -1,0 +1,21 @@
+# === Core Dependencies ===
+pandas
+openpyxl
+selenium
+webdriver-manager
+PyQt5
+pywin32
+win10toast
+pypdf
+pdf2image
+pytesseract
+Pillow
+PyMuPDF
+
+# === Optional Utilities ===
+# used by json, os, sys, threading, time, re, etc. — all built-in (no need to install)
+# used by logging, datetime, platform, math, random — built-in
+
+# === Local / Internal Modules ===
+# smducar and utils.rewards are custom modules, not on PyPI.
+# If they are your own code, make sure they are included in your project path or packaged properly.

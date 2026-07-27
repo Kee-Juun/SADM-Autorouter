@@ -1,0 +1,31 @@
+IRT SOURCE DETAILS
+
+
+Adopting Order = AO
+Change Status = CS
+Concur in Part/Dissent in Part = CD
+Concurring Opinion Concur in Part = COP
+Corrections = CC
+Counsel Information = CI
+Disposition Only = DD
+Dissenting Opinion Dissent in Part = DOP
+Excluded = E
+Exhibit, Attachments, Appendix = EX
+Judgement = J
+Letter = LE
+List of documents = LOD
+Minutes = M
+Opinion = OP
+Order = OR
+Order, Not Online
+Order, Online
+Published Opinion, Online
+Release
+Reports and Recommendations/Finding of Facts/Conclusion of Law
+Review/Rehearing/Reconsideration
+Table-(5-day spec source)
+Unpublished Opinion, Not online
+Unpublished Opinion, Online
+Vacate Quash
+Withdraw
+Writ

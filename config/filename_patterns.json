@@ -1,0 +1,186 @@
+{
+  "version": "1.0",
+  "description": "Centralized filename pattern configuration for all autorouter modes (SMD, DAR, WC)",
+  "last_updated": "2025-01-15",
+  
+  "counsel_detection": {
+    "description": "Patterns to identify counsel/ARC files across all modes",
+    "global_patterns": [
+      {
+        "pattern": "counsel",
+        "type": "substring",
+        "case_sensitive": false,
+        "description": "Any filename containing 'counsel' (case-insensitive)"
+      },
+      {
+        "pattern": "arc",
+        "type": "substring",
+        "case_sensitive": false,
+        "description": "Any filename containing 'arc' (case-insensitive) - treated as counsel"
+      }
+    ],
+    "mode_specific_patterns": {
+      "smd": [
+        {
+          "pattern": "counsel",
+          "type": "substring",
+          "case_sensitive": false,
+          "description": "SMD counsel files contain 'counsel'"
+        }
+      ],
+      "dar": [
+        {
+          "pattern": "dar.*counsel",
+          "type": "regex",
+          "case_sensitive": false,
+          "description": "DAR files with counsel in filename"
+        }
+      ],
+      "wc": [
+        {
+          "pattern": "wc_[a-z]{2}.*_counsel",
+          "type": "regex",
+          "case_sensitive": false,
+          "description": "WC pattern with counsel suffix"
+        }
+      ]
+    }
+  },
+  
+  "docket_extraction": {
+    "description": "Regex patterns to extract docket numbers from filenames",
+    "patterns": {
+      "smd": [
+        {
+          "pattern": "LDC_SMD_([\\d\\-]+)[a-z]?",
+          "description": "Standard SMD pattern: LDC_SMD_24-7640a -> 24-7640",
+          "example": "LDC_SMD_24-7640a_E2E_PCQ.pdf",
+          "extraction_group": 1,
+          "priority": 1
+        },
+        {
+          "pattern": "LDC_SMD([_\\-])([\\d\\-]+)[a-z]?",
+          "description": "Alternative SMD pattern with separator",
+          "example": "LDC_SMD_24-7640counsel_E2E.htm",
+          "extraction_group": 2,
+          "priority": 2
+        },
+        {
+          "pattern": "smd_(\\d+-\\d+)",
+          "description": "Lowercase SMD pattern",
+          "example": "smd_24-5838_CA6_25_20251112_142485669.pdf",
+          "extraction_group": 1,
+          "priority": 3
+        }
+      ],
+      "dar": [
+        {
+          "pattern": "dar_[\\w\\-]*(\\d{2})[-_]?(cv|md|cd|mc|cr|mj)(\\d+)(?:[-_]|(?=[a-zA-Z]))",
+          "description": "Primary DAR pattern: DAR_924cv80713 -> 24-80713",
+          "example": "DAR_924cv80713-56_E2E.pdf",
+          "extraction_groups": [1, 3],
+          "format": "{group1}-{group3}",
+          "priority": 1,
+          "court_types": ["cv", "md", "cd", "mc", "cr", "mj"]
+        },
+        {
+          "pattern": "dar_(\\d{2})-(\\d+)",
+          "description": "Simple DAR fallback pattern",
+          "example": "dar_24-30184_CA5_10092025.pdf",
+          "extraction_groups": [1, 2],
+          "format": "{group1}-{group2}",
+          "priority": 2
+        },
+        {
+          "pattern": "ldc_(pc|rr)_[\\w\\-]*(\\d{2})[-_]?(cv|md|cd|mc|cr|mj)(\\d+)",
+          "description": "LDC_PC / LDC_RR DAR-style patterns",
+          "example": "LDC_PC_24cv80713.pdf",
+          "extraction_groups": [2, 4],
+          "format": "{group2}-{group4}",
+          "priority": 3,
+          "court_types": ["cv", "md", "cd", "mc", "cr", "mj"]
+        },
+        {
+          "pattern": "LDC_SMD_([\\d\\-]+)[a-z]?",
+          "description": "SMD fallback pattern for DAR mode: LDC_SMD_24-7640a -> 24-7640",
+          "example": "LDC_SMD_24-7640a_E2E_PCQ.pdf",
+          "extraction_group": 1,
+          "priority": 4
+        },
+        {
+          "pattern": "smd_(\\d+-\\d+)",
+          "description": "Lowercase SMD fallback pattern for DAR mode: smd_24-5838 -> 24-5838",
+          "example": "smd_24-5838_CA6_25_20251112_142485669.pdf",
+          "extraction_group": 1,
+          "priority": 5
+        }
+      ],
+      "wc": [
+        {
+          "pattern": "wc_[a-z]{2}_\\d+[-_](\\d{2})(cv|cr|md)(\\d+)(?:-\\d+)?[_-]",
+          "description": "Primary WC pattern: wc_cl_9-23cv80992 -> 23-80992",
+          "example": "wc_cl_9-23cv80992_FLSD_200_20250214_140074073.pdf",
+          "extraction_groups": [1, 3],
+          "format": "{group1}-{group3}",
+          "priority": 1,
+          "court_types": ["cv", "cr", "md"]
+        },
+        {
+          "pattern": "wc_[a-z]{2}_(\\d{3})(cv|cr|md)(\\d+)(?:-\\d+)?[_-]",
+          "description": "Alternative WC pattern: wc_ad_322cv3898 -> 22-3898",
+          "example": "wc_ad_322cv3898_SCD_Counsel.htm",
+          "extraction_groups": [1, 3],
+          "format": "{last2ofgroup1}-{group3}",
+          "priority": 2,
+          "court_types": ["cv", "cr", "md"]
+        }
+      ]
+    }
+  },
+  
+  "file_type_indicators": {
+    "description": "Additional indicators for file type classification",
+    "main_opinion_indicators": [
+      {
+        "pattern": "_E2E_",
+        "type": "substring",
+        "description": "E2E indicator in filename"
+      },
+      {
+        "pattern": "_PCQ",
+        "type": "substring",
+        "description": "PCQ indicator in filename"
+      }
+    ],
+    "counsel_indicators": [
+      {
+        "pattern": "counsel-\\d+",
+        "type": "regex",
+        "description": "Counsel with number suffix (normalized to 'counsel')"
+      }
+    ]
+  },
+  
+  "normalization_rules": {
+    "description": "Rules for normalizing filenames before pattern matching",
+    "preprocessing": [
+      {
+        "pattern": "counsel-\\d+",
+        "replacement": "counsel",
+        "description": "Normalize counsel-1, counsel-2, etc. to 'counsel'"
+      },
+      {
+        "pattern": "_\\d{8}",
+        "replacement": "",
+        "description": "Remove date segments like _MMDDYYYY"
+      }
+    ]
+  },
+  
+  "notes": {
+    "adding_new_patterns": "To add a new pattern: 1) Add pattern to appropriate mode section, 2) Set priority (lower = higher priority), 3) Update extraction_groups and format, 4) Test with example filename",
+    "counsel_detection": "Counsel detection is cumulative - if any pattern matches, file is considered counsel",
+    "docket_extraction": "Patterns are tried in priority order until one matches",
+    "court_types": "Supported court type abbreviations: cv, md, cd, mc, cr, mj (for DAR), cv, cr, md (for WC)"
+  }
+}

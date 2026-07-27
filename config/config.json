@@ -1,0 +1,13 @@
+{
+    "headless": true,
+    "show_console": false,
+    "dar_mode": false,
+    "mode": "ohtax0",
+    "parallel_routers_enabled": true,
+    "parallel_lni_limit": 0,
+    "parallel_router_instances": 6,
+    "critical_error_email_enabled": true,
+    "run_summary_email_enabled": true,
+    "critical_error_developer_email": "kevinjohn.libuna@reedelsevier.com",
+    "critical_error_user_email": ""
+}

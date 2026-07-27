@@ -1,0 +1,7 @@
+{
+    "headless": false,
+    "environment": "prod",
+    "timeout": 60,
+    "retry_attempts": 3,
+    "log_level": "INFO"
+}
