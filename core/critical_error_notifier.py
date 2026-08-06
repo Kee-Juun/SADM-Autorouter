@@ -174,7 +174,7 @@ def _mode_display_name(mode):
     return labels.get(normalized, f"{_format_mode_label(mode)} Autorouter" if mode else "SMD Autorouter")
 
 
-def _success_email_theme():
+def _legacy_success_email_theme():
     return _pick((
         {
             "subject": "Run complete, receipts attached",
@@ -333,7 +333,7 @@ def _success_email_theme():
     ))
 
 
-def _critical_email_theme():
+def _legacy_critical_email_theme():
     return _pick((
         {
             "subject": "Run needs a look",
@@ -490,14 +490,236 @@ def _critical_email_theme():
     ))
 
 
+SUCCESS_SUBJECTS = (
+    "The queue is clear",
+    "Run complete and neatly documented",
+    "Clean run with the receipts attached",
+    "Everything routed cleanly",
+    "The paper trail is ready",
+    "Run wrapped with notes in place",
+    "Queue cleared without a fuss",
+    "Routing finished and records are ready",
+    "Clean finish from the routing desk",
+    "Batch handled with receipts",
+    "The run landed cleanly",
+    "Documents routed and notes packed",
+    "This one closed cleanly",
+    "Run complete with a tidy trail",
+    "The queue behaved today",
+    "Routing done, records in hand",
+    "Finished cleanly with the details attached",
+    "Another batch safely wrapped",
+    "The records are ready for review",
+    "Clean run, tidy notes",
+    "The batch is closed",
+    "Run finished with everything attached",
+    "Queue cleared and documented",
+    "A clean little routing win",
+    "The run is done and traceable",
+    "Routing complete with no loose ends",
+    "The paperwork made it home",
+    "Files routed, trail secured",
+    "Run closed with receipts ready",
+    "All clear from the routing desk",
+)
+
+
+CRITICAL_SUBJECTS = (
+    "Run needs a quick review",
+    "A few rows need another pass",
+    "The bot paused with clues attached",
+    "Routing stopped with a report ready",
+    "This run needs attention",
+    "Issue caught and documented",
+    "The report is ready for review",
+    "Run interrupted with notes attached",
+    "A routing snag needs a look",
+    "The queue hit a checkpoint",
+    "Not finished yet, but documented",
+    "Some rows need rerun",
+    "The run paused before guessing",
+    "Critical stop with clues ready",
+    "Chrome may need a fresh start",
+    "Search Inventory needs another pass",
+    "The Modify button went missing",
+    "PDF text needs a closer look",
+    "Related counsel needs attention",
+    "Router session needs review",
+    "The batch needs a careful rerun",
+    "Issue logged with context",
+    "Something stopped the run cleanly",
+    "The trail is ready for debugging",
+    "A rerun path is ready",
+    "Review needed with receipts attached",
+    "The bot stopped and brought notes",
+    "The queue needs a second look",
+    "Run paused with the evidence intact",
+    "Critical report ready",
+)
+
+
+SUCCESS_GREETINGS = (
+    "Good news,",
+    "Quick update,",
+    "Hello from the routing desk,",
+    "Friendly run update,",
+    "Hi there,",
+    "Run update,",
+    "A tidy little update,",
+    "Good news from the queue,",
+)
+
+
+SUCCESS_OPENERS = (
+    "{app_name} finished the run and kept the paper trail tidy. We love a clean exit.",
+    "{app_name} made it through the batch cleanly, with the useful details packed and ready.",
+    "{app_name} closed this run without drama and brought the notes along like a professional.",
+    "{app_name} handled the queue and left behind enough context for future-you to breathe.",
+    "{app_name} finished routing and did the polite thing: documented everything.",
+    "{app_name} wrapped the work cleanly. The queue is handled, and the receipts did not wander off.",
+    "{app_name} completed the run with the numbers below and the supporting files attached.",
+    "{app_name} got through the batch and kept the documentation close. Sensible behavior. We approve.",
+    "{app_name} finished the run and left a tidy trail behind. Very considerate of the next person.",
+    "{app_name} handled this one cleanly. Nothing mystical, just useful automation with notes.",
+)
+
+
+SUCCESS_SCOREBOARDS = (
+    "Quick run snapshot:",
+    "The useful numbers:",
+    "Run scorecard:",
+    "For the record:",
+    "Here is the clean little breakdown:",
+    "Routing snapshot:",
+)
+
+
+SUCCESS_ATTACHMENT_LINES = (
+    "I attached the run summary, current log, and completed mapping sheet copy so nobody has to go digging later.",
+    "The summary, current log, and mapping sheet copy are attached for quick review and future troubleshooting.",
+    "The important files are attached: summary, log, and mapping sheet copy. Receipts, but organized.",
+    "I included the summary, log, and mapping sheet copy so the run can be checked without a folder scavenger hunt.",
+    "The supporting files are attached, because a good run deserves a readable paper trail.",
+    "Summary, current log, and mapping sheet copy are attached. Future debugging gets to start from facts.",
+)
+
+
+SUCCESS_CLOSERS = (
+    "Clean finish. Receipts included.",
+    "A small routing win, neatly documented.",
+    "Done, traceable, and ready for the archive shelf.",
+    "That is the run, wrapped and behaving.",
+    "Clean queue, clean notes, calm ending.",
+    "Nicely handled. The paperwork made it home.",
+    "A tidy finish from your routing desk.",
+    "Closed cleanly, with no loose ends left wandering.",
+)
+
+
+CRITICAL_GREETINGS = (
+    "Quick heads-up,",
+    "Routing alert,",
+    "Hi there,",
+    "Careful pause from the routing desk,",
+    "Heads up,",
+    "Quick review needed,",
+    "Friendly alert,",
+    "The bot has a note,",
+)
+
+
+CRITICAL_OPENERS = (
+    "{app_name} hit a real stopping point and paused before making the situation messier. Sensible, if slightly dramatic.",
+    "{app_name} ran into something it could not safely push through, so it stopped and gathered the details.",
+    "{app_name} paused on a critical issue. Not ideal, but the clues are organized and ready.",
+    "{app_name} found a snag worth documenting. The run did not finish cleanly, but the trail is intact.",
+    "{app_name} stopped at the right moment instead of guessing. Annoying, yes. Useful for debugging, also yes.",
+    "{app_name} ran into a blocker and packed the evidence before the trail could get fuzzy.",
+    "{app_name} could not complete the run cleanly, so it saved the context for a faster review.",
+    "{app_name} needs a look. The good news: the report arrived with the clues already grouped.",
+)
+
+
+CRITICAL_SNAPSHOTS = (
+    "What happened:",
+    "Issue snapshot:",
+    "The useful details:",
+    "What needs review:",
+    "The short version:",
+    "Captured context:",
+)
+
+
+CRITICAL_ATTACHMENT_LINES = (
+    "I attached the critical summary, payload, current log, and mapping sheet copy so review can start from actual clues.",
+    "The summary, payload, log, and mapping sheet copy are attached. No detective work from scratch required.",
+    "The supporting files are attached, including the payload and current log, so the fix has a proper starting point.",
+    "I included the critical report files and mapping sheet copy so the next pass can be targeted instead of chaotic.",
+    "The useful files are bundled: summary, payload, log, and mapping sheet copy.",
+    "Everything needed for first-pass troubleshooting is attached. Very polite for a failure report.",
+)
+
+
+CRITICAL_CLOSERS = (
+    "Not the ending we wanted, but the trail is tidy.",
+    "A little annoying, very documented.",
+    "The run needs attention, but at least the clues showed up organized.",
+    "This one needs review. The paper trail is ready.",
+    "The issue is logged, and the rerun path is clearer now.",
+    "Not a clean finish, but not a mystery either.",
+    "The bot paused, brought notes, and left the next step visible.",
+    "Recoverable energy. With attachments.",
+)
+
+
+def _success_email_theme():
+    return {
+        "subject": _pick(SUCCESS_SUBJECTS),
+        "hello": _pick(SUCCESS_GREETINGS),
+        "opener": _pick(SUCCESS_OPENERS),
+        "scoreboard": _pick(SUCCESS_SCOREBOARDS),
+        "attachments": _pick(SUCCESS_ATTACHMENT_LINES),
+        "closer": _pick(SUCCESS_CLOSERS),
+    }
+
+
+def _critical_email_theme():
+    return {
+        "subject": _pick(CRITICAL_SUBJECTS),
+        "hello": _pick(CRITICAL_GREETINGS),
+        "opener": _pick(CRITICAL_OPENERS),
+        "snapshot": _pick(CRITICAL_SNAPSHOTS),
+        "attachments": _pick(CRITICAL_ATTACHMENT_LINES),
+        "closer": _pick(CRITICAL_CLOSERS),
+    }
+
+
+def _format_email_timestamp(timestamp):
+    try:
+        if isinstance(timestamp, datetime.datetime):
+            value = timestamp
+        else:
+            value = datetime.datetime.fromisoformat(str(timestamp or "").replace("Z", "+00:00"))
+        return value.strftime("%m/%d/%Y %I:%M:%S %p")
+    except Exception:
+        return str(timestamp or "").replace("T", " ")
+
+
+def _format_email_subject(subject_mode, timestamp, theme):
+    mode_label = str(subject_mode or "GENERAL").strip().upper()
+    if mode_label == "AUTOROUTER":
+        mode_label = "GENERAL"
+    return f"SADM Autorouter: {mode_label} - {theme['subject']} - {_format_email_timestamp(timestamp)}"
+
+
 def _success_subject(subject_mode, timestamp, theme=None):
     theme = theme or _success_email_theme()
-    return f"[{subject_mode}] {theme['subject']} - {timestamp}"
+    return _format_email_subject(subject_mode, timestamp, theme)
 
 
 def _critical_subject(subject_mode, timestamp, theme=None):
     theme = theme or _critical_email_theme()
-    return f"[{subject_mode}] {theme['subject']} - {timestamp}"
+    return _format_email_subject(subject_mode, timestamp, theme)
 
 
 def _format_count_line(label, value):
@@ -528,7 +750,7 @@ def _format_run_status_examples(summary, max_rows=12):
 
     lines = ["Rows to rerun preview:"]
     for row in rows[:max_rows]:
-        excel_row = row.get("Excel Row", "N/A")
+        excel_row = row.get("Excel Row") or row.get("Row") or "N/A"
         lni = row.get("LNI", "N/A")
         status = row.get("Status", "N/A")
         lines.append(f"- Row {excel_row}: {lni} ({status})")
@@ -536,6 +758,116 @@ def _format_run_status_examples(summary, max_rows=12):
     if extra_count:
         lines.append(f"- ...and {extra_count} more row(s).")
     return lines
+
+
+def _flatten_payload_text(value):
+    if isinstance(value, dict):
+        return " ".join(_flatten_payload_text(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(_flatten_payload_text(item) for item in value)
+    return str(value or "")
+
+
+def _critical_issue_key(payload, run_status_summary):
+    text = " ".join((
+        _flatten_payload_text(payload.get("title")),
+        _flatten_payload_text(payload.get("error")),
+        _flatten_payload_text(payload.get("details")),
+        _flatten_payload_text(payload.get("status_updates")),
+        _flatten_payload_text(payload.get("error_log_entries")),
+        _flatten_payload_text(run_status_summary),
+    )).lower()
+
+    if "user reset" in text or "reset the bot" in text or "reset automation" in text:
+        return "user_reset"
+    if any(marker in text for marker in (
+        "invalid session id",
+        "session lost",
+        "chrome not reachable",
+        "disconnected",
+        "target window already closed",
+        "no such window",
+        "router session lost",
+    )):
+        return "router_session_lost"
+    if "search inventory" in text:
+        return "search_inventory"
+    if "modify button" in text or "modify failed" in text or "modify mode" in text:
+        return "modify_button"
+    if any(marker in text for marker in (
+        "pdf data not found",
+        "pdf text extraction returned no text",
+        "unreadable pdf",
+        "ocr",
+        "pytesseract",
+        "tesseract",
+    )):
+        return "pdf_unreadable"
+    if "related lni" in text or "no counsel attached" in text or "missing counsel" in text:
+        return "related_lni"
+    if (run_status_summary or {}).get("needs_rerun_count", 0):
+        return "needs_rerun"
+    return "general"
+
+
+def _critical_troubleshooting_steps(payload, run_status_summary):
+    issue_key = _critical_issue_key(payload, run_status_summary)
+
+    playbooks = {
+        "user_reset": (
+            "If the reset was intentional, this is mostly a cleanup report, not instant panic.",
+            "Open the attached mapping sheet and filter the Status column for NEEDS RERUN.",
+            "Rerun the same sheet and leave DONE or ALREADY PROCESSED rows unchanged; the bot will skip them.",
+            "If the reset happened because the bot looked frozen, send this report with the log so the pause point can be reviewed.",
+        ),
+        "router_session_lost": (
+            "Close any leftover Chrome windows that were opened by the bot.",
+            "Relaunch the bot, then rerun the attached mapping sheet.",
+            "Keep DONE and ALREADY PROCESSED rows as-is; focus on NEEDS RERUN rows.",
+            "If it happens again, try fewer parallel routers first. Chrome may simply be asking for a smaller circus.",
+        ),
+        "search_inventory": (
+            "Confirm the IRT site opens normally in Chrome.",
+            "Rerun the attached mapping sheet and let the bot retry the NEEDS RERUN rows.",
+            "If Search Inventory keeps failing, try signing into IRT fresh before launching the bot again.",
+            "For repeated failures, reduce parallel routers and send the attached report for review.",
+        ),
+        "modify_button": (
+            "Rerun the attached mapping sheet and focus on rows marked NEEDS RERUN.",
+            "If the same LNI fails again, manually open that IRT form and check whether it is locked, already processed, or loading unusually slowly.",
+            "Leave DONE and ALREADY PROCESSED rows alone so the rerun stays targeted.",
+            "Send this report if the Modify button keeps disappearing. That page may be stale, locked, or being dramatic in a very specific way.",
+        ),
+        "pdf_unreadable": (
+            "Open the downloaded PDF from the report or download folder and confirm it has readable text.",
+            "If it is scanned or image-only, confirm Tesseract OCR is installed or bundled with the EXE being used.",
+            "Rerun the affected NEEDS RERUN row after OCR support is confirmed.",
+            "If OCR is available but the same PDF still fails, send the PDF plus this report for parser review.",
+        ),
+        "related_lni": (
+            "Check whether the required counsel LNI exists in the mapping sheet.",
+            "Confirm the counsel row is DONE before rerunning the related main opinion.",
+            "If counsel is missing, add or route the counsel first, then rerun the main opinion row.",
+            "If the counsel exists but will not attach, send the report so the related-LNI flow can be checked.",
+        ),
+        "needs_rerun": (
+            "Open the attached mapping sheet and filter the Status column for NEEDS RERUN.",
+            "Rerun the same sheet; the bot should skip rows marked DONE or ALREADY PROCESSED.",
+            "If the same row fails twice, check that LNI manually in IRT before another rerun.",
+            "Send this report for review if the rerun does not clear the affected rows.",
+        ),
+        "general": (
+            "Open the attached mapping sheet and check whether any rows are marked NEEDS RERUN.",
+            "If rows need rerun, rerun the same sheet and leave DONE or ALREADY PROCESSED rows unchanged.",
+            "Review the attached current log for the first ERROR near the bottom of the run.",
+            "If the same issue repeats, send the full report folder for review.",
+        ),
+    }
+    return playbooks.get(issue_key, playbooks["general"])
+
+
+def _format_troubleshooting_steps(steps):
+    return [f"{index}. {step}" for index, step in enumerate(steps, start=1)]
 
 
 def _build_critical_email_body(payload, report_dir, theme=None):
@@ -577,6 +909,14 @@ def _build_critical_email_body(payload, report_dir, theme=None):
         if example_lines:
             lines.extend(["", *example_lines])
 
+    troubleshooting_steps = _critical_troubleshooting_steps(payload, run_status_summary)
+    if troubleshooting_steps:
+        lines.extend([
+            "",
+            "Suggested next steps:",
+            *_format_troubleshooting_steps(troubleshooting_steps),
+        ])
+
     lines.extend([
         "",
         theme["attachments"],
@@ -585,7 +925,7 @@ def _build_critical_email_body(payload, report_dir, theme=None):
         str(report_dir),
         "",
         theme["closer"],
-        "- SMD Autorouter",
+        "- Your SMD Autorouter",
     ])
     return "\n".join(lines)
 
@@ -648,7 +988,7 @@ def _build_success_email_body(mode, counts, report_dir, theme=None):
         str(report_dir),
         "",
         theme["closer"],
-        "- SMD Autorouter",
+        "- Your SMD Autorouter",
     ])
     return "\n".join(lines)
 

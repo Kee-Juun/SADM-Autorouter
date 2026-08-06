@@ -76,12 +76,12 @@ def parse_mspb_document_text(text: str, filename_hint: Optional[str] = None) -> 
     header_normalized = _normalize_text(header_text)
 
     court = classify_mspb_court(header_normalized, filename_hint=filename_hint)
-    source_detail = classify_mspb_source_detail(court, header_normalized)
     docket_numbers = extract_mspb_dockets(lines)
     docket_number = docket_numbers[0] if docket_numbers else None
     other_numbers = tuple(docket for docket in docket_numbers[1:] if docket != docket_number)
     decision_date = extract_mspb_decision_date(text)
     title_hint = _find_title_hint(lines) or _title_hint_from_filename(filename_hint)
+    source_detail = classify_mspb_source_detail(court, header_normalized, title_hint=title_hint)
 
     if not docket_number or not decision_date or not source_detail:
         logging.warning(
@@ -117,13 +117,22 @@ def classify_mspb_court(header_normalized: str, filename_hint: Optional[str] = N
     return "FDMSPB02"
 
 
-def classify_mspb_source_detail(court: str, header_normalized: str) -> str:
+def classify_mspb_source_detail(court: str, header_normalized: str, title_hint: str = "") -> str:
     """Return the IRT Source Detail value for an MSPB document."""
     if court == "FDMSPB01":
         return "Opinion"
     if court == "FDMSPB00":
         return "Order"
+
+    title_normalized = _normalize_text(title_hint)
+    if re.search(r"\bOPINION\b", title_normalized) or title_normalized.startswith("DECISION"):
+        return "Opinion"
+    if re.search(r"\bORDER\b", title_normalized):
+        return "Order"
+
     if "OPINION AND ORDER" in header_normalized or re.search(r"\bOPINION\b", header_normalized):
+        return "Opinion"
+    if re.search(r"\bDECISION\b", header_normalized):
         return "Opinion"
     return "Order" if re.search(r"\bORDER\b", header_normalized) else "Opinion"
 
@@ -312,18 +321,11 @@ def _clean_lines(text: str) -> list[str]:
 
 def _get_header_text(lines: list[str]) -> str:
     header = []
-    title_patterns = {
-        "INITIAL DECISION",
-        "ORDER",
-        "FINAL ORDER",
-        "OPINION AND ORDER",
-        "DECISION",
-    }
 
     for line in lines[:100]:
         header.append(line)
         normalized = _normalize_text(line)
-        if normalized in title_patterns and len(header) > 5:
+        if _line_is_mspb_title(normalized) and len(header) > 5:
             break
 
     return "\n".join(header or lines[:60])
@@ -332,9 +334,16 @@ def _get_header_text(lines: list[str]) -> str:
 def _find_title_hint(lines: list[str]) -> str:
     for line in lines[:100]:
         normalized = _normalize_text(line)
-        if normalized in {"INITIAL DECISION", "ORDER", "FINAL ORDER", "OPINION AND ORDER", "DECISION"}:
+        if _line_is_mspb_title(normalized):
             return normalized
     return ""
+
+
+def _line_is_mspb_title(normalized_line: str) -> bool:
+    return bool(
+        normalized_line in {"INITIAL DECISION", "ORDER", "FINAL ORDER", "OPINION AND ORDER", "DECISION"}
+        or re.match(r"^(?:INITIAL DECISION|OPINION AND ORDER|FINAL ORDER|ORDER|DECISION)\b", normalized_line)
+    )
 
 
 def filename_indicates_initial_decision(filename_hint: Optional[str]) -> bool:

@@ -2128,8 +2128,10 @@ class CaseLawRouter:
         main_tab = getattr(self, '_main_tab', self.driver.current_window_handle)
         opened_tab = getattr(self, '_opened_tab', None)
         
-        # --- Use attempt_open_modify for robust Modify button and alert handling ---
-        found_modify = self.attempt_open_modify(row_index=row_index)
+        # Let the outer form-opening wrapper own Modify retries. If the current
+        # IRT tab is stale, one failed wait is enough; the next attempt should
+        # reopen the LNI from Search Inventory instead of waiting in-place again.
+        found_modify = self.attempt_open_modify(row_index=row_index, max_attempts=1)
         
         if found_modify:
             # Proceed with usual workflow
