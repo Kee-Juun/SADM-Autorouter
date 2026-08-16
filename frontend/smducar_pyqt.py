@@ -1048,23 +1048,27 @@ class SMDUSAPGui(QMainWindow):
 
         # Otherwise show the compact success/processed/timeout summary.
         if current_mode == "mspb":
-            lines = [f"{app_name} Auto-Routing Summary:", "", "Already processed:"]
-            lines.append(f"MSPB: {main_already}")
+            lines = [f"{app_name} Auto-Routing Summary:"]
             if (main_success or 0) > 0:
                 lines.append("")
                 lines.append("Successfully auto-routed:")
                 lines.append(f"MSPB: {main_success}")
             lines.append("")
+            lines.append("Already processed:")
+            lines.append(f"MSPB: {main_already}")
+            lines.append("")
             lines.append(summary_closer())
             return "\n".join(lines)
 
         if current_mode == "itc":
-            lines = [f"{app_name} Auto-Routing Summary:", "", "Already processed:"]
-            lines.append(f"ITC: {main_already}")
+            lines = [f"{app_name} Auto-Routing Summary:"]
             if (main_success or 0) > 0:
                 lines.append("")
                 lines.append("Successfully auto-routed:")
                 lines.append(f"ITC: {main_success}")
+            lines.append("")
+            lines.append("Already processed:")
+            lines.append(f"ITC: {main_already}")
             if (main_timeout or 0) > 0:
                 lines.append("")
                 lines.append("Timeout issues:")
@@ -1074,12 +1078,14 @@ class SMDUSAPGui(QMainWindow):
             return "\n".join(lines)
 
         if current_mode == "irsplr":
-            lines = [f"{app_name} Auto-Routing Summary:", "", "Already processed:"]
-            lines.append(f"IRSPLR: {main_already}")
+            lines = [f"{app_name} Auto-Routing Summary:"]
             if (main_success or 0) > 0:
                 lines.append("")
                 lines.append("Successfully auto-routed:")
                 lines.append(f"IRSPLR: {main_success}")
+            lines.append("")
+            lines.append("Already processed:")
+            lines.append(f"IRSPLR: {main_already}")
             if (main_timeout or 0) > 0:
                 lines.append("")
                 lines.append("Timeout issues:")
@@ -1089,12 +1095,14 @@ class SMDUSAPGui(QMainWindow):
             return "\n".join(lines)
 
         if current_mode == "ohtax0":
-            lines = [f"{app_name} Auto-Routing Summary:", "", "Already processed:"]
-            lines.append(f"OHTAX0: {main_already}")
+            lines = [f"{app_name} Auto-Routing Summary:"]
             if (main_success or 0) > 0:
                 lines.append("")
                 lines.append("Successfully auto-routed:")
                 lines.append(f"OHTAX0: {main_success}")
+            lines.append("")
+            lines.append("Already processed:")
+            lines.append(f"OHTAX0: {main_already}")
             if (main_timeout or 0) > 0:
                 lines.append("")
                 lines.append("Timeout issues:")
@@ -1104,12 +1112,14 @@ class SMDUSAPGui(QMainWindow):
             return "\n".join(lines)
 
         if current_mode == "mnsutb":
-            lines = [f"{app_name} Auto-Routing Summary:", "", "Already processed:"]
-            lines.append(f"MNSUTB: {main_already}")
+            lines = [f"{app_name} Auto-Routing Summary:"]
             if (main_success or 0) > 0:
                 lines.append("")
                 lines.append("Successfully auto-routed:")
                 lines.append(f"MNSUTB: {main_success}")
+            lines.append("")
+            lines.append("Already processed:")
+            lines.append(f"MNSUTB: {main_already}")
             if (main_timeout or 0) > 0:
                 lines.append("")
                 lines.append("Timeout issues:")
@@ -1118,9 +1128,7 @@ class SMDUSAPGui(QMainWindow):
             lines.append(summary_closer())
             return "\n".join(lines)
 
-        lines = [f"{app_name} Auto-Routing Summary:", "", "Already processed:"]
-        lines.append(f"Counsel: {counsel_already}")
-        lines.append(f"Main Opinion: {main_already}")
+        lines = [f"{app_name} Auto-Routing Summary:"]
 
         if (counsel_success or 0) > 0 or (main_success or 0) > 0:
             lines.append("")
@@ -1129,6 +1137,11 @@ class SMDUSAPGui(QMainWindow):
                 lines.append(f"Counsel: {counsel_success}")
             if (main_success or 0) > 0:
                 lines.append(f"Main Opinion: {main_success}")
+
+        lines.append("")
+        lines.append("Already processed:")
+        lines.append(f"Counsel: {counsel_already}")
+        lines.append(f"Main Opinion: {main_already}")
 
         if (counsel_timeout or 0) > 0 or (main_timeout or 0) > 0:
             lines.append("")
