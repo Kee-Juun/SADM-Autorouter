@@ -50,6 +50,7 @@ from .smducar_selenium import (
 )
 
 from .rerun_status import (
+    STATUS_DONE,
     STATUS_PROCESSING,
     STATUS_NEEDS_RERUN_INTERRUPTED,
     defer_main_rows_with_failed_counsel,
@@ -218,6 +219,9 @@ class CaseLawRouter:
             "RELATED LNI ERROR",
             "RELATED LNI TIMEOUT",
             "RELATED LNI FIELD LOCKED",
+            "ROUTE ERROR",
+            "ROUTE_ERROR",
+            "ROUTE DROPDOWN ERROR",
         }
 
     def _mark_remaining_rows_after_router_session_loss(self, df, current_full_index, message):
@@ -2460,9 +2464,18 @@ class CaseLawRouter:
 
                 lni_duration = time.time() - lni_start
                 total_duration += lni_duration
-                processed_count += 1
+                final_status = normalize_status(status_updates_buffer.get(full_index) or form_status)
 
-                logging.info(f"[LNI PROCESSING TIME] LNI {lni} processed in {lni_duration:.2f} seconds.")
+                if final_status == STATUS_DONE:
+                    processed_count += 1
+                    logging.info(f"[LNI PROCESSING TIME] LNI {lni} routed and saved in {lni_duration:.2f} seconds.")
+                elif is_completed_status(final_status):
+                    logging.info(f"[LNI PROCESSING TIME] LNI {lni} finished as {final_status} in {lni_duration:.2f} seconds.")
+                else:
+                    logging.warning(
+                        f"[LNI PROCESSING TIME] LNI {lni} ended as {final_status or 'UNKNOWN'} after "
+                        f"{lni_duration:.2f} seconds; not counted as successfully routed."
+                    )
 
 
             except RouterSessionLostError as e:
@@ -2529,7 +2542,7 @@ class CaseLawRouter:
             elapsed = time.time() - batch_start_time
             mins = int(elapsed // 60)
             secs = int(elapsed % 60)
-            logging.info(f"[AVERAGE BATCH PROCESSING TIME - LNI/HOUR ESTIMATE] Processed {processed_count} {batch_type} LNIs in {mins}m {secs}s "
+            logging.info(f"[AVERAGE BATCH PROCESSING TIME - LNI/HOUR ESTIMATE] Successfully routed {processed_count} {batch_type} LNIs in {mins}m {secs}s "
                         f"(Avg: {avg:.2f}s/LNI → Est. {est_per_hour} LNIs/hour)")
             
         return processed_count, total_duration
@@ -3027,7 +3040,7 @@ class CaseLawRouter:
                 self.driver.execute_script("document.getElementById('route').dispatchEvent(new Event('change'))")
                 self.handle_any_alert()
             except Exception as e:
-                logging.error(f"Failed to select route before Ready to Process")
+                logging.error(f"Failed to select route before Ready to Process: {e}")
                 status_updates_buffer[row_index] = "ROUTE ERROR"
                 self.driver.close()
                 self.driver.switch_to.window(self.driver.window_handles[0])
@@ -3120,8 +3133,8 @@ class CaseLawRouter:
                 logging.info("Selected MSPB route: Outside Conversion")
                 self.driver.execute_script("document.getElementById('route').dispatchEvent(new Event('change'))")
                 self.handle_any_alert()
-            except Exception:
-                logging.error("Failed to select MSPB route before Ready to Process")
+            except Exception as e:
+                logging.error(f"Failed to select MSPB route before Ready to Process: {e}")
                 status_updates_buffer[row_index] = "ROUTE ERROR"
                 self.driver.close()
                 self.driver.switch_to.window(self.driver.window_handles[0])
@@ -3297,8 +3310,8 @@ class CaseLawRouter:
                         logging.info("Set and confirmed disabled ITC route dropdown is Archive for Excluded source detail.")
                 else:
                     raise Exception("ITC route dropdown is disabled before route selection")
-            except Exception:
-                logging.error("Failed to select ITC route before Ready to Process")
+            except Exception as e:
+                logging.error(f"Failed to select ITC route before Ready to Process: {e}")
                 status_updates_buffer[row_index] = "ROUTE ERROR"
                 self.driver.close()
                 self.driver.switch_to.window(self.driver.window_handles[0])
@@ -3439,8 +3452,8 @@ class CaseLawRouter:
                         logging.info("Set and confirmed disabled IRSPLR route dropdown is Archive for Excluded source detail.")
                 else:
                     raise Exception("IRSPLR route dropdown is disabled before route selection")
-            except Exception:
-                logging.error("Failed to select IRSPLR route before Ready to Process")
+            except Exception as e:
+                logging.error(f"Failed to select IRSPLR route before Ready to Process: {e}")
                 status_updates_buffer[row_index] = "ROUTE ERROR"
                 self.driver.close()
                 self.driver.switch_to.window(self.driver.window_handles[0])
@@ -3533,8 +3546,8 @@ class CaseLawRouter:
                     self.handle_any_alert()
                 else:
                     raise Exception("OHTAX0 route dropdown is disabled before route selection")
-            except Exception:
-                logging.error("Failed to select OHTAX0 route before Ready to Process")
+            except Exception as e:
+                logging.error(f"Failed to select OHTAX0 route before Ready to Process: {e}")
                 status_updates_buffer[row_index] = "ROUTE ERROR"
                 self.driver.close()
                 self.driver.switch_to.window(self.driver.window_handles[0])
@@ -3627,8 +3640,8 @@ class CaseLawRouter:
                     self.handle_any_alert()
                 else:
                     raise Exception("MNSUTB route dropdown is disabled before route selection")
-            except Exception:
-                logging.error("Failed to select MNSUTB route before Ready to Process")
+            except Exception as e:
+                logging.error(f"Failed to select MNSUTB route before Ready to Process: {e}")
                 status_updates_buffer[row_index] = "ROUTE ERROR"
                 self.driver.close()
                 self.driver.switch_to.window(self.driver.window_handles[0])
@@ -4065,7 +4078,7 @@ class CaseLawRouter:
                 if mspb_count > 0:
                     total_mins = int(mspb_duration // 60)
                     total_secs = int(mspb_duration % 60)
-                    logging.info("[MSPB PROCESSING SUMMARY] MSPB: %d LNIs processed in %dm %ds", mspb_count, total_mins, total_secs)
+                    logging.info("[MSPB PROCESSING SUMMARY] MSPB: %d LNIs successfully routed in %dm %ds", mspb_count, total_mins, total_secs)
                 return counsel_df, main_df
 
             if itc_mode:
@@ -4081,7 +4094,7 @@ class CaseLawRouter:
                 if itc_count > 0:
                     total_mins = int(itc_duration // 60)
                     total_secs = int(itc_duration % 60)
-                    logging.info("[ITC PROCESSING SUMMARY] ITC: %d LNIs processed in %dm %ds", itc_count, total_mins, total_secs)
+                    logging.info("[ITC PROCESSING SUMMARY] ITC: %d LNIs successfully routed in %dm %ds", itc_count, total_mins, total_secs)
                 return counsel_df, main_df
 
             if irsplr_mode:
@@ -4106,7 +4119,7 @@ class CaseLawRouter:
                 if irsplr_count > 0:
                     total_mins = int(irsplr_duration // 60)
                     total_secs = int(irsplr_duration % 60)
-                    logging.info("[IRSPLR PROCESSING SUMMARY] IRSPLR: %d LNIs processed in %dm %ds", irsplr_count, total_mins, total_secs)
+                    logging.info("[IRSPLR PROCESSING SUMMARY] IRSPLR: %d LNIs successfully routed in %dm %ds", irsplr_count, total_mins, total_secs)
                 return counsel_df, main_df
 
             if ohtax0_mode:
@@ -4131,7 +4144,7 @@ class CaseLawRouter:
                 if ohtax0_count > 0:
                     total_mins = int(ohtax0_duration // 60)
                     total_secs = int(ohtax0_duration % 60)
-                    logging.info("[OHTAX0 PROCESSING SUMMARY] OHTAX0: %d LNIs processed in %dm %ds", ohtax0_count, total_mins, total_secs)
+                    logging.info("[OHTAX0 PROCESSING SUMMARY] OHTAX0: %d LNIs successfully routed in %dm %ds", ohtax0_count, total_mins, total_secs)
                 return counsel_df, main_df
 
             if mnsutb_mode:
@@ -4156,7 +4169,7 @@ class CaseLawRouter:
                 if mnsutb_count > 0:
                     total_mins = int(mnsutb_duration // 60)
                     total_secs = int(mnsutb_duration % 60)
-                    logging.info("[MNSUTB PROCESSING SUMMARY] MNSUTB: %d LNIs processed in %dm %ds", mnsutb_count, total_mins, total_secs)
+                    logging.info("[MNSUTB PROCESSING SUMMARY] MNSUTB: %d LNIs successfully routed in %dm %ds", mnsutb_count, total_mins, total_secs)
                 return counsel_df, main_df
 
             logging.info("=== Starting Counsel Batch ===")
@@ -4208,7 +4221,7 @@ class CaseLawRouter:
                 main_mins = int(main_duration // 60)
                 main_secs = int(main_duration % 60)
 
-                logging.info("[TOTAL AVERAGE PROCESSING TIME SUMMARY - LNI/HOUR ESTIMATE] TOTAL: %d LNIs processed in %dm %ds", total_count, total_mins, total_secs)
+                logging.info("[TOTAL AVERAGE PROCESSING TIME SUMMARY - LNI/HOUR ESTIMATE] TOTAL: %d LNIs successfully routed in %dm %ds", total_count, total_mins, total_secs)
                 logging.info("    - Counsel: %d LNIs in %dm %ds", counsel_count, counsel_mins, counsel_secs)
                 logging.info("    - Main Opinion: %d LNIs in %dm %ds", main_count, main_mins, main_secs)
                 logging.info("    - Overall Avg: %.1fs/LNI → Est. %d LNIs/hour", overall_avg, overall_est_per_hour)
@@ -4827,8 +4840,16 @@ class CaseLawRouter:
         case_name_xpath = '//*[@id="caseName"]'
         try:
             field = self.wait.until(EC.presence_of_element_located((By.XPATH, case_name_xpath)))
-            if not field.get_attribute("value").strip():
-                self.clear_and_fill_input(case_name_xpath, "RE")
+            existing_case_name = self.wait_for_existing_field_text(case_name_xpath, timeout=6)
+            if existing_case_name:
+                logging.info(f"Main Opinion Case Name already present; leaving unchanged: {existing_case_name[:120]}")
+            else:
+                if field.is_enabled() and field.get_attribute("readonly") != "true":
+                    field.clear()
+                    field.send_keys("RE")
+                    logging.info("Main Opinion Case Name was blank; set to RE.")
+                else:
+                    logging.info("Skipped Main Opinion Case Name because it is not interactable.")
         except Exception as e:
             logging.error(f"Error setting case name")
 

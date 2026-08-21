@@ -1052,7 +1052,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
         overall_avg = total_time / total_count
         overall_est_per_hour = int(3600 / overall_avg) if overall_avg else 0
         logging.info(
-            "[PARALLEL ROUTER SUMMARY] TOTAL: %d LNIs processed in %dm %ds",
+            "[PARALLEL ROUTER SUMMARY] TOTAL: %d LNIs successfully routed in %dm %ds",
             total_count,
             int(total_time // 60),
             int(total_time % 60),
