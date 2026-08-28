@@ -43,6 +43,7 @@ class ITCMetadata:
     duplicate_of_lni: str = ""
     is_excluded: bool = False
     exclusion_reason: str = ""
+    used_filename_docket_fallback: bool = False
 
 
 def is_itc_court_code(court_code) -> bool:
@@ -151,7 +152,13 @@ def parse_itc_document_text(
     content_fingerprint = compute_itc_content_fingerprint(text)
     has_text_content = bool(content_fingerprint)
     content_docket = extract_primary_itc_docket(text)
-    docket_number = content_docket or (None if has_text_content else extract_itc_docket_from_filename(filename_hint))
+    docket_number, used_filename_docket_fallback = resolve_itc_docket_number(
+        text,
+        filename_hint,
+        has_text_content,
+        content_docket,
+        court,
+    )
     decision_date = extract_itc_decision_date_from_text(text, court) or extract_itc_date_from_filename(filename_hint)
     exclusion_reason = classify_itc_exclusion(text, court)
     source_detail = "Excluded" if exclusion_reason else get_itc_source_detail(court)
@@ -179,12 +186,89 @@ def parse_itc_document_text(
         has_text_content=has_text_content,
         is_excluded=bool(exclusion_reason),
         exclusion_reason=exclusion_reason,
+        used_filename_docket_fallback=used_filename_docket_fallback,
     )
+
+
+def resolve_itc_docket_number(
+    text: str,
+    filename_hint: Optional[str],
+    has_text_content: bool,
+    content_docket: Optional[str],
+    court: Optional[str],
+) -> tuple[Optional[str], bool]:
+    if content_docket:
+        return content_docket, False
+
+    filename_docket = extract_itc_docket_from_filename(filename_hint)
+    if not filename_docket:
+        return None, False
+
+    if not has_text_content:
+        return filename_docket, True
+
+    if should_use_itc_filename_docket_fallback(text, filename_docket, court):
+        logging.warning(
+            "ITC PDF text was readable, but no primary docket was found in the document; "
+            "using filename docket fallback: %s",
+            filename_docket,
+        )
+        return filename_docket, True
+
+    return None, False
+
+
+def should_use_itc_filename_docket_fallback(text: str, filename_docket: str, court: Optional[str]) -> bool:
+    if not looks_like_itc_document_text(text, court):
+        logging.warning(
+            "Readable text did not look like an ITC document; not using ITC filename docket fallback."
+        )
+        return False
+
+    loose_dockets = extract_loose_itc_docket_candidates(text)
+    conflicting_dockets = [docket for docket in loose_dockets if docket != filename_docket]
+    if conflicting_dockets:
+        logging.warning(
+            "Readable ITC text contains possible docket(s) %s that conflict with filename docket %s; "
+            "not using filename docket fallback.",
+            ", ".join(conflicting_dockets),
+            filename_docket,
+        )
+        return False
+
+    if loose_dockets:
+        logging.info(
+            "Readable ITC text only exposed loose docket candidate(s) matching the filename; "
+            "using filename docket fallback."
+        )
+    return True
 
 
 def extract_primary_itc_docket(text: str) -> Optional[str]:
     numbers = extract_itc_docket_numbers(text)
     return numbers[0] if numbers else None
+
+
+def extract_loose_itc_docket_candidates(text: str) -> list[str]:
+    if not text:
+        return []
+
+    normalized_text = normalize_itc_text(text)
+    candidates = []
+
+    patterns = (
+        r"\b(337|701|731)\s*(?:-| )?\s*TA\s*(?:-| )?\s*(\d{2,5}(?:\s*-\s*\d{2,5})*)\b",
+        r"\b(?:INV(?:ESTIGATION)?\.?\s+NO(?:S)?\.?\s*[:#]?\s*)(337|701|731)\s*-\s*(\d{2,5})\b",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, normalized_text, re.IGNORECASE):
+            prefix = match.group(1)
+            tail = match.group(2)
+            for docket in expand_itc_ta_docket_range(prefix, tail):
+                if docket not in candidates:
+                    candidates.append(docket)
+
+    return candidates
 
 
 def extract_itc_docket_numbers(text: str) -> list[str]:
@@ -439,6 +523,24 @@ def compute_itc_content_fingerprint(text: str) -> str:
     if len(normalized) < 200:
         return ""
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def looks_like_itc_document_text(text: str, court: Optional[str] = None) -> bool:
+    if not text:
+        return False
+
+    text_upper = normalize_itc_text(text).upper()
+    if (
+        "INTERNATIONAL TRADE COMMISSION" in text_upper
+        or "INV. NO." in text_upper
+        or "INVESTIGATION NO." in text_upper
+        or "ORDER NO." in text_upper
+    ):
+        return True
+
+    if str(court or "").strip().upper() == "FDITCALJ":
+        return "ADMINISTRATIVE LAW JUDGE" in text_upper
+    return False
 
 
 def normalize_itc_text(text) -> str:

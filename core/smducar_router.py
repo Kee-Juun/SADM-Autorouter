@@ -580,7 +580,7 @@ class CaseLawRouter:
             if metadata and getattr(metadata, "has_text_content", False):
                 return metadata
 
-            logging.warning("ITC PDF did not expose readable text; skipping filename-only fallback.")
+            logging.warning("ITC PDF metadata could not be extracted after strict filename fallback checks.")
             return None
         except Exception as e:
             logging.error(f"Error extracting ITC metadata from PDF: {e}")
