@@ -1,6 +1,11 @@
 import logging
 import re
 
+from .mosu00_extractor import (
+    extract_mosu00_docket_from_filename,
+    is_mosu00_filename,
+)
+
 
 ITC_TA_PREFIXES = {"337", "701", "731"}
 
@@ -57,6 +62,11 @@ def extract_docket_number(file_name, dar_mode=False, wc_mode=False):
     if itc_docket:
         logging.info(f"ITC mode: Extracted docket: {itc_docket}")
         return itc_docket
+
+    mosu00_docket = extract_mosu00_docket_from_filename(file_name)
+    if mosu00_docket:
+        logging.info(f"MOSU00 mode: Extracted docket: {mosu00_docket}")
+        return mosu00_docket
 
     if dar_mode:
         dar_match = re.search(
@@ -167,10 +177,10 @@ def extract_docket_number(file_name, dar_mode=False, wc_mode=False):
 
 def detect_mode(filename):
     """
-    Auto-detect the mode (SMD, DAR, MSPB, ITC, IRSPLR, OHTAX0, MNSUTB, WC) from filename patterns.
+    Auto-detect the mode (SMD, DAR, MSPB, ITC, IRSPLR, OHTAX0, MNSUTB, MOSU00, WC) from filename patterns.
 
     Returns:
-        str: 'smd', 'dar', 'mspb', 'wc', 'itc', 'irsplr', 'ohtax0', 'mnsutb', or 'unknown'
+        str: 'smd', 'dar', 'mspb', 'wc', 'itc', 'irsplr', 'ohtax0', 'mnsutb', 'mosu00', or 'unknown'
     """
     filename_str = (
         str(filename)
@@ -189,6 +199,8 @@ def detect_mode(filename):
         return "ohtax0"
     if re.match(r"^ldc_smd_a\d{2}-\d{4,6}.*\.pdf$", filename_str):
         return "mnsutb"
+    if is_mosu00_filename(filename_str):
+        return "mosu00"
     if re.match(r"^(?:ldc_bc_)?(?:\d{2}[-_]\d+|\d{4,9}).*\.pdf$", filename_str):
         return "irsplr"
     if filename_str.startswith("wc_cl_"):

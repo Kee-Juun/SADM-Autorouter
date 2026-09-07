@@ -783,6 +783,7 @@ class SMDUSAPGui(QMainWindow):
             ("irsplr", "IRSPLR Autorouter"),
             ("ohtax0", "OHTAX0 Autorouter"),
             ("mnsutb", "MNSUTB Autorouter"),
+            ("mosu00", "MOSU Autorouter"),
         ]
 
     def get_current_mode(self):
@@ -929,6 +930,9 @@ class SMDUSAPGui(QMainWindow):
         if current_mode == "mnsutb":
             logging.info("Returning MNSUTB Autorouter")
             return "MNSUTB Autorouter"
+        if current_mode == "mosu00":
+            logging.info("Returning MOSU Autorouter")
+            return "MOSU Autorouter"
         if current_mode == "dar":
             logging.info("Returning DAR Autoruter")
             return "DAR Autoruter"
@@ -949,6 +953,8 @@ class SMDUSAPGui(QMainWindow):
             return "OHTAX0 Documents Auto-Routed"
         if current_mode == "mnsutb":
             return "MNSUTB Documents Auto-Routed"
+        if current_mode == "mosu00":
+            return "MOSU Documents Auto-Routed"
         if current_mode == "dar":
             return "DAR Documents Auto-Routed"
         return "SMD USAP Documents Auto-Routed"
@@ -959,7 +965,7 @@ class SMDUSAPGui(QMainWindow):
             from core.smducar import detect_mode
             
             # Count modes in the filenames
-            mode_counts = {"smd": 0, "dar": 0, "mspb": 0, "itc": 0, "irsplr": 0, "ohtax0": 0, "mnsutb": 0, "unknown": 0}
+            mode_counts = {"smd": 0, "dar": 0, "mspb": 0, "itc": 0, "irsplr": 0, "ohtax0": 0, "mnsutb": 0, "mosu00": 0, "unknown": 0}
             
             for _, row in df.iterrows():
                 filename = str(row.get("FileName", "")).strip()
@@ -975,7 +981,7 @@ class SMDUSAPGui(QMainWindow):
             if total_files > 0 and mode_counts[most_common_mode] > total_files * 0.5:
                 current_mode = self.config.get("mode", "dar" if self.config.get("dar_mode", False) else "smd")
                 target_mode = most_common_mode
-                if most_common_mode in {"dar", "smd", "mspb", "itc", "irsplr", "ohtax0", "mnsutb"} and target_mode != current_mode:
+                if most_common_mode in {"dar", "smd", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mosu00"} and target_mode != current_mode:
                     self._set_router_mode_config(target_mode)
                     self.router_mode_signal.emit(target_mode, "auto-detection")
                     logging.info(f"Auto-detected {most_common_mode.upper()} mode from {mode_counts[most_common_mode]}/{total_files} files")
@@ -1001,12 +1007,16 @@ class SMDUSAPGui(QMainWindow):
         elif current_mode == "mnsutb":
             app_name = "MNSUTB"
             process_name = "MNSUTB"
+        elif current_mode == "mosu00":
+            app_name = "MOSU"
+            process_name = "MOSU"
         elif current_mode == "dar":
             app_name = "DAR"
             process_name = "DAR"
         else:
             app_name = "SMD"
             process_name = "SMD USAP"
+        main_bucket_label = "Main/Table" if current_mode == "mosu00" else "Main Opinion"
         
         # If everything failed with errors and nothing was successful or already processed,
         # show the dedicated error summary per UX.
@@ -1136,12 +1146,12 @@ class SMDUSAPGui(QMainWindow):
             if (counsel_success or 0) > 0:
                 lines.append(f"Counsel: {counsel_success}")
             if (main_success or 0) > 0:
-                lines.append(f"Main Opinion: {main_success}")
+                lines.append(f"{main_bucket_label}: {main_success}")
 
         lines.append("")
         lines.append("Already processed:")
         lines.append(f"Counsel: {counsel_already}")
-        lines.append(f"Main Opinion: {main_already}")
+        lines.append(f"{main_bucket_label}: {main_already}")
 
         if (counsel_timeout or 0) > 0 or (main_timeout or 0) > 0:
             lines.append("")
@@ -1149,7 +1159,7 @@ class SMDUSAPGui(QMainWindow):
             if (counsel_timeout or 0) > 0:
                 lines.append(f"Counsel: {counsel_timeout}")
             if (main_timeout or 0) > 0:
-                lines.append(f"Main Opinion: {main_timeout}")
+                lines.append(f"{main_bucket_label}: {main_timeout}")
 
         lines.append("")
         lines.append(summary_closer())
@@ -2284,6 +2294,7 @@ class SMDUSAPGui(QMainWindow):
             "IRSPLR Batch Started": ("Processing IRSPLR Batch...", 0),
             "OHTAX0 Batch Started": ("Processing OHTAX0 Batch...", 0),
             "MNSUTB Batch Started": ("Processing MNSUTB Batch...", 0),
+            "MOSU00 Batch Started": ("Processing MOSU00 Batch...", 0),
             "Success!": ("Automation Complete!", 100),
             "Completed": ("Completed", 100),
         }
@@ -2296,6 +2307,7 @@ class SMDUSAPGui(QMainWindow):
             "IRSPLR Batch Started": "IRSPLR Processed",
             "OHTAX0 Batch Started": "OHTAX0 Processed",
             "MNSUTB Batch Started": "MNSUTB Processed",
+            "MOSU00 Batch Started": "MOSU00 Processed",
         }
 
         if message in friendly_statuses:
@@ -2319,6 +2331,7 @@ class SMDUSAPGui(QMainWindow):
             "IRSPLR Processed",
             "OHTAX0 Processed",
             "MNSUTB Processed",
+            "MOSU00 Processed",
         )
         if any(str(message).startswith(prefix) for prefix in allowed_progress_prefixes):
             try:
@@ -2354,6 +2367,10 @@ class SMDUSAPGui(QMainWindow):
             self.progress_bar.setValue(percent)
         elif batch == "mnsutb":
             self.progress_label.setText(f"MNSUTB Processed: {current}/{total}")
+            percent = int((current / total) * 100) if total > 0 else 0
+            self.progress_bar.setValue(percent)
+        elif batch == "mosu00":
+            self.progress_label.setText(f"MOSU00 Processed: {current}/{total}")
             percent = int((current / total) * 100) if total > 0 else 0
             self.progress_bar.setValue(percent)
         elif batch == "main":
@@ -2598,6 +2615,7 @@ class SMDUSAPGui(QMainWindow):
                 irsplr_mode=current_mode == "irsplr",
                 ohtax0_mode=current_mode == "ohtax0",
                 mnsutb_mode=current_mode == "mnsutb",
+                mosu00_mode=current_mode == "mosu00",
             )
             self.worker_thread.start()
         except Exception as e:
@@ -2673,6 +2691,7 @@ class SMDUSAPGui(QMainWindow):
         total_success = counsel_success + main_success
         total_already = counsel_already + main_already
         current_mode = self.config.get("mode", "dar" if self.config.get("dar_mode", False) else "smd")
+        main_bucket_label = "Main/Table" if current_mode == "mosu00" else "Main Opinion"
 
         if total_success == 0 and total_already == 0 and error_log_entries and len(error_log_entries) > 0:
             message = (
@@ -2750,13 +2769,13 @@ class SMDUSAPGui(QMainWindow):
                 f"Routing completed!\n\n"
                 f"Successfully routed {total_success} new document(s):\n"
                 f"• Counsel: {counsel_success}\n"
-                f"• Main Opinion: {main_success}\n\n"
+                f"• {main_bucket_label}: {main_success}\n\n"
             )
             if total_already > 0:
                 message += (
                     f"Additionally, {total_already} document(s) were already processed:\n"
                     f"• Counsel: {counsel_already}\n"
-                    f"• Main Opinion: {main_already}\n\n"
+                    f"• {main_bucket_label}: {main_already}\n\n"
                 )
             message += f"Way to go, {user_name}! 🚀"
 
@@ -2953,6 +2972,8 @@ class SMDUSAPGui(QMainWindow):
                 toast_title = "OHTAX0 Auto-Routing Complete"
             elif current_mode == "mnsutb":
                 toast_title = "MNSUTB Auto-Routing Complete"
+            elif current_mode == "mosu00":
+                toast_title = "MOSU Auto-Routing Complete"
             elif current_mode == "dar":
                 toast_title = "DAR Auto-Routing Complete"
             else:
@@ -4746,6 +4767,8 @@ if __name__ == '__main__':
                 app_name = "OHTAX0 Autorouter"
             elif mode == "mnsutb":
                 app_name = "MNSUTB Autorouter"
+            elif mode == "mosu00":
+                app_name = "MOSU Autorouter"
             elif mode == "dar":
                 app_name = "DAR Autoruter"
             else:

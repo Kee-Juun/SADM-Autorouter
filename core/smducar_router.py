@@ -95,6 +95,14 @@ from .mnsutb_extractor import (
     parse_mnsutb_pdf_bytes,
 )
 
+from .mosu00_extractor import (
+    MOSU00Metadata,
+    find_mosu00_source_file,
+    is_mosu00_table_row,
+    parse_mosu00_html_file,
+    parse_mosu00_html_text,
+)
+
 
 _itc_duplicate_lock = threading.Lock()
 
@@ -121,6 +129,8 @@ class CaseLawRouter:
         self.ohtax0_download_dir.mkdir(parents=True, exist_ok=True)
         self.mnsutb_download_dir = Path.home() / "Downloads" / "Case Law Auto-Routing Resources" / "MNSUTB PDF Downloads"
         self.mnsutb_download_dir.mkdir(parents=True, exist_ok=True)
+        self.mosu00_download_dir = Path.home() / "Downloads" / "Case Law Auto-Routing Resources" / "MOSU00 HTML Downloads"
+        self.mosu00_download_dir.mkdir(parents=True, exist_ok=True)
         self._archive_duplicate_mode = False
         self._irsplr_unreadable_pdf_signatures = set()
 
@@ -390,6 +400,16 @@ class CaseLawRouter:
         if row_index in mspb_metadata_buffer:
             mspb_metadata_buffer[row_index]["Metadata Type"] = "MNSUTB"
 
+    def record_mosu00_metadata(self, row_index, row, lni, metadata=None, metadata_status="Attempted"):
+        """Capture MOSU00 table metadata used for the final workbook sheet."""
+        self.record_mspb_metadata(row_index, row, lni, metadata=metadata, metadata_status=metadata_status)
+        if row_index in mspb_metadata_buffer:
+            mspb_metadata_buffer[row_index]["Metadata Type"] = "MOSU00"
+            if metadata:
+                child_dockets = getattr(metadata, "child_dockets", ()) or ()
+                mspb_metadata_buffer[row_index]["Extracted Other Numbers"] = "; ".join(child_dockets[1:])
+                mspb_metadata_buffer[row_index]["Prepared Comments"] = getattr(metadata, "comments_text", "") or ""
+
     def mark_itc_duplicate_status(self, row_index, row, lni, metadata: ITCMetadata):
         """Mark ITC metadata as a true duplicate when this run already saw identical PDF text."""
         if not metadata or not getattr(metadata, "content_fingerprint", ""):
@@ -645,6 +665,32 @@ class CaseLawRouter:
             logging.error(f"Error extracting MNSUTB metadata from PDF: {e}")
             return None
 
+    def extract_mosu00_metadata_from_search_result(self, row, row_index=None, file_path=None):
+        """Open the result HTML from the File Name column and parse MOSU00 table metadata."""
+        try:
+            link_element = self.find_mspb_file_name_link(row)
+            if link_element is not None:
+                metadata = self.open_mosu00_link_and_extract_metadata(link_element, row)
+                if metadata:
+                    return metadata
+                logging.warning("MOSU00 table HTML link opened, but metadata was not readable.")
+            else:
+                logging.warning("MOSU00 File Name link was not found in the search results.")
+
+            file_name = str(row.get("FileName", "")).strip()
+            local_file = find_mosu00_source_file(file_name, reference_path=file_path)
+            if local_file:
+                metadata = parse_mosu00_html_file(local_file)
+                if metadata:
+                    self.log_mosu00_metadata(metadata, f"local file {local_file.name}")
+                    return metadata
+                logging.warning("MOSU00 local HTML fallback could not parse required metadata: %s", local_file)
+
+            return None
+        except Exception as e:
+            logging.error(f"Error extracting MOSU00 table metadata from HTML: {e}")
+            return None
+
     def find_mspb_file_name_link(self, row):
         """Find the clickable document link under the File Name column in IRT results."""
         file_name = str(row.get("FileName", "")).strip()
@@ -685,6 +731,11 @@ class CaseLawRouter:
 
         # Fallback: first visible PDF-looking link in the results.
         for candidate in self.driver.find_elements(By.XPATH, "//a[contains(translate(@href, 'PDF', 'pdf'), '.pdf')]"):
+            if candidate.is_displayed():
+                return candidate
+
+        # MOSU00 table rows can be HTML instead of PDF.
+        for candidate in self.driver.find_elements(By.XPATH, "//a[contains(translate(@href, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '.html') or contains(translate(@href, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '.htm')]"):
             if candidate.is_displayed():
                 return candidate
 
@@ -1034,6 +1085,86 @@ class CaseLawRouter:
             except Exception:
                 pass
 
+    def open_mosu00_link_and_extract_metadata(self, element, row):
+        """Open the linked MOSU00 HTML document in a browser tab and parse table metadata."""
+        main_tab = self.driver.current_window_handle
+        main_url = ""
+        try:
+            main_url = self.driver.current_url
+        except Exception:
+            pass
+        before_handles = set(self.driver.window_handles)
+        before_downloads = self.snapshot_mosu00_downloads()
+        opened_tab = None
+        file_name = str(row.get("FileName", "")).strip()
+
+        try:
+            href = self._get_element_href(element)
+            expected_filename = self.get_filename_from_document_href(href) or file_name
+            self.enable_chrome_downloads(self.mosu00_download_dir)
+            if href:
+                target_url = urljoin(self.driver.current_url, href)
+                self.driver.execute_script("window.open(arguments[0], '_blank');", target_url)
+            else:
+                target_url = None
+                element.click()
+
+            downloaded_metadata = self.wait_for_mosu00_downloaded_metadata(
+                before_downloads,
+                expected_filename,
+                timeout=8,
+            )
+            if downloaded_metadata:
+                return downloaded_metadata
+
+            try:
+                WebDriverWait(self.driver, 10).until(lambda d: len(d.window_handles) > len(before_handles))
+                new_handles = set(self.driver.window_handles) - before_handles
+                if new_handles:
+                    opened_tab = new_handles.pop()
+                    self.driver.switch_to.window(opened_tab)
+            except TimeoutException:
+                logging.info("MOSU00 table link did not open a new tab; trying to read the current browser context.")
+
+            downloaded_metadata = self.wait_for_mosu00_downloaded_metadata(
+                before_downloads,
+                expected_filename,
+                timeout=12,
+            )
+            if downloaded_metadata:
+                return downloaded_metadata
+
+            metadata = self.wait_for_mosu00_metadata_from_open_tab(
+                target_url,
+                expected_filename=expected_filename,
+                timeout=30,
+            )
+            if metadata:
+                return metadata
+
+            logging.warning("MOSU00 HTML tab opened, but metadata could not be extracted from the browser-rendered document.")
+            return None
+        except Exception as e:
+            logging.warning(f"Could not read MOSU00 table document in browser tab: {e}")
+            return None
+        finally:
+            try:
+                if opened_tab and opened_tab in self.driver.window_handles:
+                    self.driver.close()
+                if main_tab in self.driver.window_handles:
+                    self.driver.switch_to.window(main_tab)
+                    if not opened_tab and main_url:
+                        try:
+                            current_url = self.driver.current_url
+                            if current_url != main_url:
+                                self.driver.back()
+                                self.wait_for_open_tab_load_state(timeout=10)
+                                logging.info("Returned to Search Inventory after reading MOSU00 HTML in the same tab.")
+                        except Exception as exc:
+                            logging.warning("Could not return to Search Inventory after MOSU00 HTML read: %s", exc)
+            except Exception:
+                pass
+
     def wait_for_itc_metadata_from_open_tab(self, target_url=None, before_downloads=None, expected_filename=None, court_code=None, timeout=45):
         deadline = time.time() + timeout
         self._mspb_pdf_request_ids = set()
@@ -1274,6 +1405,38 @@ class CaseLawRouter:
         self.log_mspb_pdf_tab_diagnostics("MNSUTB")
         return None
 
+    def wait_for_mosu00_metadata_from_open_tab(self, target_url=None, expected_filename=None, timeout=30):
+        deadline = time.time() + timeout
+        last_status_log = 0
+
+        while time.time() < deadline:
+            self.wait_for_open_tab_load_state(timeout=5)
+
+            visible_text = self.read_open_pdf_tab_text()
+            metadata = parse_mosu00_html_text(visible_text, filename_hint=expected_filename)
+            if metadata:
+                self.log_mosu00_metadata(metadata, "browser visible HTML")
+                return metadata
+
+            page_source = ""
+            try:
+                page_source = self.driver.page_source or ""
+            except Exception:
+                page_source = ""
+            metadata = parse_mosu00_html_text(page_source, filename_hint=expected_filename)
+            if metadata:
+                self.log_mosu00_metadata(metadata, "browser page source")
+                return metadata
+
+            if time.time() - last_status_log >= 10:
+                logging.info("Waiting for MOSU00 HTML document to finish loading/expose table text...")
+                last_status_log = time.time()
+
+            time.sleep(1.5)
+
+        self.log_mspb_pdf_tab_diagnostics("MOSU00")
+        return None
+
     def wait_for_mspb_metadata_from_open_tab(self, target_url=None, before_downloads=None, expected_filename=None, timeout=75):
         """Poll an opened PDF tab until the document is loaded enough to parse."""
         deadline = time.time() + timeout
@@ -1419,6 +1582,18 @@ class CaseLawRouter:
                     continue
         return snapshot
 
+    def snapshot_mosu00_downloads(self):
+        self.mosu00_download_dir.mkdir(parents=True, exist_ok=True)
+        snapshot = {}
+        for path in self.mosu00_download_dir.glob("*"):
+            if path.is_file():
+                try:
+                    stat = path.stat()
+                    snapshot[path.name.lower()] = (stat.st_mtime, stat.st_size)
+                except Exception:
+                    continue
+        return snapshot
+
     def wait_for_itc_downloaded_metadata(self, before_downloads, expected_filename=None, court_code=None, timeout=30):
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -1515,6 +1690,23 @@ class CaseLawRouter:
                     return None
                 except Exception as e:
                     logging.warning(f"Downloaded MNSUTB PDF could not be parsed: {pdf_path} ({e})")
+            time.sleep(0.5)
+        return None
+
+    def wait_for_mosu00_downloaded_metadata(self, before_downloads, expected_filename=None, timeout=20):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            html_path = self.find_completed_mosu00_download(before_downloads, expected_filename)
+            if html_path:
+                try:
+                    metadata = parse_mosu00_html_file(html_path)
+                    if metadata:
+                        self.log_mosu00_metadata(metadata, f"downloaded HTML {html_path.name}")
+                        return metadata
+                    logging.warning("Downloaded MOSU00 HTML %s did not contain required table metadata.", html_path.name)
+                    return None
+                except Exception as e:
+                    logging.warning(f"Downloaded MOSU00 HTML could not be parsed: {html_path} ({e})")
             time.sleep(0.5)
         return None
 
@@ -1633,6 +1825,33 @@ class CaseLawRouter:
         candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return candidates[0]
 
+    def find_completed_mosu00_download(self, before_downloads, expected_filename=None):
+        expected_lower = expected_filename.lower() if expected_filename else None
+        active_downloads = list(self.mosu00_download_dir.glob("*.crdownload"))
+        candidates = []
+
+        for path in list(self.mosu00_download_dir.glob("*.htm")) + list(self.mosu00_download_dir.glob("*.html")):
+            try:
+                stat = path.stat()
+            except Exception:
+                continue
+
+            prior = before_downloads.get(path.name.lower())
+            changed = prior is None or prior != (stat.st_mtime, stat.st_size)
+            expected_match = self.path_matches_expected_download(path, expected_lower)
+            if expected_lower and not expected_match:
+                continue
+
+            if (expected_match and changed) or (not expected_lower and changed):
+                if not any(str(download).lower().startswith(str(path).lower()) for download in active_downloads):
+                    candidates.append(path)
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return candidates[0]
+
     def find_completed_mspb_download(self, before_downloads, expected_filename=None):
         expected_lower = expected_filename.lower() if expected_filename else None
         active_downloads = list(self.mspb_download_dir.glob("*.crdownload"))
@@ -1710,7 +1929,7 @@ class CaseLawRouter:
             if values:
                 return unquote(values[0])
             name = Path(unquote(parsed.path)).name
-            return name if name.lower().endswith(".pdf") else None
+            return name if name.lower().endswith((".pdf", ".htm", ".html")) else None
         except Exception:
             return None
 
@@ -2107,6 +2326,17 @@ class CaseLawRouter:
             "; ".join(metadata.other_numbers or ()),
         )
 
+    def log_mosu00_metadata(self, metadata, source):
+        logging.info(
+            "Extracted MOSU00 table metadata from %s: court=%s parent_docket=%s decision_date=%s source_detail=%s child_dockets=%s",
+            source,
+            metadata.court,
+            metadata.docket_number,
+            metadata.decision_date,
+            metadata.source_detail,
+            "; ".join(metadata.child_dockets or ()),
+        )
+
     def _get_element_href(self, element):
         href = element.get_attribute("href")
         if href:
@@ -2126,7 +2356,7 @@ class CaseLawRouter:
         parts = value.split("'")
         return "concat(" + ", \"'\", ".join(f"'{part}'" for part in parts) + ")"
 
-    def open_and_process_form(self, row, full_df, row_index, file_path, retry_count=0, dar_mode=False, wc_mode=False, mspb_mode=False, mspb_metadata=None, itc_metadata=None, irsplr_metadata=None, ohtax0_metadata=None, mnsutb_metadata=None):
+    def open_and_process_form(self, row, full_df, row_index, file_path, retry_count=0, dar_mode=False, wc_mode=False, mspb_mode=False, mspb_metadata=None, itc_metadata=None, irsplr_metadata=None, ohtax0_metadata=None, mnsutb_metadata=None, mosu00_metadata=None):
         max_modify_attempts = 3
         # Store current tab state
         main_tab = getattr(self, '_main_tab', self.driver.current_window_handle)
@@ -2153,6 +2383,7 @@ class CaseLawRouter:
                 irsplr_metadata=irsplr_metadata,
                 ohtax0_metadata=ohtax0_metadata,
                 mnsutb_metadata=mnsutb_metadata,
+                mosu00_metadata=mosu00_metadata,
             )
             if status == "DONE":
                 self.submit_irt_form(file_path, row_index)
@@ -2197,6 +2428,7 @@ class CaseLawRouter:
                         irsplr_metadata=irsplr_metadata,
                         ohtax0_metadata=ohtax0_metadata,
                         mnsutb_metadata=mnsutb_metadata,
+                        mosu00_metadata=mosu00_metadata,
                     )
                 else:
                     logging.error(f"Failed to re-search LNI before Modify retry {retry_count + 2}/{max_modify_attempts}")
@@ -2250,6 +2482,7 @@ class CaseLawRouter:
         irsplr_metadata=None,
         ohtax0_metadata=None,
         mnsutb_metadata=None,
+        mosu00_metadata=None,
     ):
         lni = str(row.get("LNI", "")).strip()
         logging.warning(
@@ -2278,9 +2511,10 @@ class CaseLawRouter:
             irsplr_metadata=irsplr_metadata,
             ohtax0_metadata=ohtax0_metadata,
             mnsutb_metadata=mnsutb_metadata,
+            mosu00_metadata=mosu00_metadata,
         )
 
-    def process_batch(self, df, full_df, file_path, update_progress, batch_type, dar_mode=False, wc_mode=False, mspb_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False):
+    def process_batch(self, df, full_df, file_path, update_progress, batch_type, dar_mode=False, wc_mode=False, mspb_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mosu00_mode=False):
         self.safe_alert_accept()
 
         processed_rows = 0
@@ -2290,7 +2524,7 @@ class CaseLawRouter:
         total_duration = 0
 
         # Emit 0/total progress at the start so UI shows batch start immediately
-        if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb"]:
+        if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mosu00"]:
             update_progress(batch_type, 0, total_rows)
 
         stop_batch = False
@@ -2317,10 +2551,12 @@ class CaseLawRouter:
                 irsplr_metadata = None
                 ohtax0_metadata = None
                 mnsutb_metadata = None
+                mosu00_metadata = None
                 row_is_itc = is_itc_row(row)
                 row_is_irsplr = is_irsplr_row(row)
                 row_is_ohtax0 = is_ohtax0_row(row)
                 row_is_mnsutb = is_mnsutb_row(row)
+                row_is_mosu00_table = is_mosu00_table_row(row)
                 if mspb_mode:
                     self.record_mspb_metadata(full_index, row, lni, metadata_status="Attempted")
 
@@ -2419,6 +2655,23 @@ class CaseLawRouter:
 
                     self.record_mnsutb_metadata(full_index, row, lni, metadata=mnsutb_metadata, metadata_status="Extracted")
                     self.click_matching_result()
+                elif mosu00_mode and row_is_mosu00_table:
+                    self.record_mosu00_metadata(full_index, row, lni, metadata_status="Attempted")
+
+                    if not self.search_lni(lni) or not self.check_result_available():
+                        self.record_mosu00_metadata(full_index, row, lni, metadata_status="Search Failed")
+                        status_updates_buffer[full_index] = "ERROR: LNI NOT FOUND"
+                        continue
+
+                    mosu00_metadata = self.extract_mosu00_metadata_from_search_result(row, full_index, file_path=file_path)
+                    if not mosu00_metadata:
+                        self.record_mosu00_metadata(full_index, row, lni, metadata_status="Not Extracted")
+                        status_updates_buffer[full_index] = "SKIPPED: MOSU00 HTML DATA NOT FOUND"
+                        logging.warning(f"Skipping MOSU00 row {full_index + 2}: required table HTML metadata could not be extracted.")
+                        continue
+
+                    self.record_mosu00_metadata(full_index, row, lni, metadata=mosu00_metadata, metadata_status="Extracted")
+                    self.click_matching_result()
                 else:
                     if not self.handle_lni_search(lni):
                         status_updates_buffer[full_index] = "ERROR: LNI NOT FOUND"
@@ -2437,6 +2690,7 @@ class CaseLawRouter:
                     irsplr_metadata=irsplr_metadata,
                     ohtax0_metadata=ohtax0_metadata,
                     mnsutb_metadata=mnsutb_metadata,
+                    mosu00_metadata=mosu00_metadata,
                 )
 
                 # ⏱ End timing
@@ -2455,6 +2709,7 @@ class CaseLawRouter:
                         irsplr_metadata=irsplr_metadata,
                         ohtax0_metadata=ohtax0_metadata,
                         mnsutb_metadata=mnsutb_metadata,
+                        mosu00_metadata=mosu00_metadata,
                     )
 
                 if form_status and not is_completed_status(form_status):
@@ -2476,6 +2731,13 @@ class CaseLawRouter:
                         f"[LNI PROCESSING TIME] LNI {lni} ended as {final_status or 'UNKNOWN'} after "
                         f"{lni_duration:.2f} seconds; not counted as successfully routed."
                     )
+                    error_log_entries.append({
+                        "Row": full_index + 2,
+                        "LNI": row.get("LNI", ""),
+                        "File Name": row.get("FileName", "") or row.get("File Name", ""),
+                        "Status": final_status or "UNKNOWN",
+                        "Error Message": f"Ended as {final_status or 'UNKNOWN'} during {batch_type} batch."
+                    })
 
 
             except RouterSessionLostError as e:
@@ -2511,6 +2773,10 @@ class CaseLawRouter:
                     existing_status = mspb_metadata_buffer.get(full_index, {}).get("Metadata Status", "")
                     metadata_status = "Extracted" if existing_status == "Extracted" else "Error"
                     self.record_mnsutb_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
+                elif is_mosu00_table_row(row):
+                    existing_status = mspb_metadata_buffer.get(full_index, {}).get("Metadata Status", "")
+                    metadata_status = "Extracted" if existing_status == "Extracted" else "Error"
+                    self.record_mosu00_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
                 status_updates_buffer[full_index] = "ERROR"
                 error_log_entries.append({
                     "Row": full_index + 2,
@@ -2527,12 +2793,12 @@ class CaseLawRouter:
             finally:
                 # ✅ Always update progress, regardless of success or error
                 processed_rows += 1
-                if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb"]:
+                if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mosu00"]:
                     update_progress(batch_type, processed_rows, total_rows)
 
         # ✅ ⏱ Final summary log: outside the loop
             if stop_batch:
-                if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb"]:
+                if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mosu00"]:
                     update_progress(batch_type, total_rows, total_rows)
                 break
 
@@ -2908,7 +3174,7 @@ class CaseLawRouter:
             logging.info("Ready to Process checkbox is not clickable; treating the document as already processed.")
             return "READY_NOT_CLICKABLE"
 
-    def fill_irt_form(self, row, full_df, row_index, file_path, skip_ready_check=False, dar_mode=False, wc_mode=False, mspb_mode=False, mspb_metadata=None, itc_metadata=None, irsplr_metadata=None, ohtax0_metadata=None, mnsutb_metadata=None):
+    def fill_irt_form(self, row, full_df, row_index, file_path, skip_ready_check=False, dar_mode=False, wc_mode=False, mspb_mode=False, mspb_metadata=None, itc_metadata=None, irsplr_metadata=None, ohtax0_metadata=None, mnsutb_metadata=None, mosu00_metadata=None):
         try:
             file_name = str(row["FileName"]).strip()
             is_counsel_file = is_counsel(file_name, dar_mode, wc_mode)
@@ -2924,6 +3190,8 @@ class CaseLawRouter:
                 return self.fill_ohtax0_irt_form(row, row_index, ohtax0_metadata)
             if mnsutb_metadata:
                 return self.fill_mnsutb_irt_form(row, row_index, mnsutb_metadata)
+            if mosu00_metadata:
+                return self.fill_mosu00_table_irt_form(row, row_index, mosu00_metadata)
             
             # Determine decision date with clear precedence:
             # 1) Explicit Decision Date from Mapping Data sheet (column K) - HIGHEST PRIORITY
@@ -3210,6 +3478,18 @@ class CaseLawRouter:
                 return True
         except Exception as e:
             logging.debug("Could not inspect already-processed state for %s: %s", context_label, e)
+        return False
+
+    def is_route_locked_already_processed(self, context_label="Document"):
+        """Return True only for the high-confidence route-locked already-processed state."""
+        try:
+            comments_field = self.wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="comments"]')))
+            route_field = self.wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="route"]')))
+            if not route_field.is_enabled() and comments_field.is_enabled():
+                logging.info("%s route dropdown is disabled; treating document as ALREADY PROCESSED.", context_label)
+                return True
+        except Exception as e:
+            logging.debug("Could not inspect route-locked already-processed state for %s: %s", context_label, e)
         return False
 
     def fill_itc_irt_form(self, row, row_index, itc_metadata: ITCMetadata):
@@ -3671,6 +3951,487 @@ class CaseLawRouter:
                 status_updates_buffer[row_index] = "ERROR"
             return "ERROR"
 
+    def fill_mosu00_table_irt_form(self, row, row_index, mosu00_metadata: MOSU00Metadata):
+        """Fill an IRT form for MOSU00 table-case routing."""
+        try:
+            if not mosu00_metadata:
+                logging.warning("Skipping MOSU00 table row because extracted metadata is missing.")
+                if row_index is not None:
+                    status_updates_buffer[row_index] = "SKIPPED: MOSU00 HTML DATA NOT FOUND"
+                return "SKIPPED: MOSU00 HTML DATA NOT FOUND"
+
+            file_name = str(row.get("FileName", "")).strip()
+            self.prepare_common_fields(
+                file_name,
+                decision_date=mosu00_metadata.decision_date,
+                dar_mode=False,
+                wc_mode=False,
+                docket_override=mosu00_metadata.docket_number,
+                court=None,
+            )
+            self.handle_any_alert()
+
+            if not self.handle_mosu00_table_fields(row, mosu00_metadata):
+                if self.is_route_locked_already_processed("MOSU00"):
+                    status_updates_buffer[row_index] = "ALREADY PROCESSED"
+                    self.driver.close()
+                    self.driver.switch_to.window(self.driver.window_handles[0])
+                    return "ALREADY PROCESSED"
+                if row_index is not None:
+                    status_updates_buffer[row_index] = "SKIPPED: MOSU00 TABLE FORM FILL ERROR"
+                return "SKIPPED: MOSU00 TABLE FORM FILL ERROR"
+
+            try:
+                comments_field = self.wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="comments"]')))
+                route_field = self.wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="route"]')))
+
+                if not route_field.is_enabled() and comments_field.is_enabled():
+                    logging.info("Route dropdown is disabled - MOSU00 table document already processed.")
+                    status_updates_buffer[row_index] = "ALREADY PROCESSED"
+                    self.driver.close()
+                    self.driver.switch_to.window(self.driver.window_handles[0])
+                    return "ALREADY PROCESSED"
+
+                if not comments_field.is_enabled() and not route_field.is_enabled():
+                    logging.error("MOSU00 table IRT form is non-interactable.")
+                    status_updates_buffer[row_index] = "NON-INTERACTABLE IRT FORM"
+                    self.driver.close()
+                    self.driver.switch_to.window(self.driver.window_handles[0])
+                    return "NON-INTERACTABLE IRT FORM"
+            except Exception:
+                logging.error("Could not verify MOSU00 table form interactability.")
+                status_updates_buffer[row_index] = "NON-INTERACTABLE IRT FORM"
+                self.driver.close()
+                self.driver.switch_to.window(self.driver.window_handles[0])
+                return "NON-INTERACTABLE IRT FORM"
+
+            try:
+                route_element = self.wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="route"]')))
+                if route_element.is_enabled():
+                    route_element = WebDriverWait(self.driver, 3).until(EC.element_to_be_clickable((By.XPATH, '//*[@id="route"]')))
+                    route_element.click()
+                    self.handle_any_alert()
+                    dropdown = Select(route_element)
+                    dropdown.select_by_visible_text("Outside Conversion")
+                    self.handle_any_alert()
+                    logging.info("Selected MOSU00 table route: Outside Conversion")
+                    self.driver.execute_script("document.getElementById('route').dispatchEvent(new Event('change'))")
+                    self.handle_any_alert()
+                else:
+                    raise Exception("MOSU00 table route dropdown is disabled before route selection")
+            except Exception as e:
+                logging.error(f"Failed to select MOSU00 route before Ready to Process: {e}")
+                status_updates_buffer[row_index] = "ROUTE ERROR"
+                self.driver.close()
+                self.driver.switch_to.window(self.driver.window_handles[0])
+                return "ROUTE ERROR"
+
+            overlay_appeared = self.click_ready_checkbox_and_check_overlay(False)
+            self.handle_any_alert()
+            if overlay_appeared == "ROUTE_ERROR":
+                self.driver.close()
+                self.driver.switch_to.window(self.driver.window_handles[0])
+                return "ROUTE ERROR"
+            if overlay_appeared == "ALERT_HANDLED":
+                self.driver.close()
+                self.driver.switch_to.window(self.driver.window_handles[0])
+                return "ALERT_HANDLED"
+            if overlay_appeared == "READY_NOT_CLICKABLE":
+                logging.info("Ready to Process checkbox was not clickable for MOSU00; marking document as ALREADY PROCESSED.")
+                status_updates_buffer[row_index] = "ALREADY PROCESSED"
+                self.driver.close()
+                self.driver.switch_to.window(self.driver.window_handles[0])
+                return "ALREADY PROCESSED"
+
+            return self.handle_routing_and_save(False, row_index, skip_route_and_ready=True)
+        except Exception as e:
+            logging.error(f"Error in fill_mosu00_table_irt_form(): {e}")
+            if row_index is not None:
+                status_updates_buffer[row_index] = "ERROR"
+            return "ERROR"
+
+    def handle_mosu00_table_fields(self, row, mosu00_metadata: MOSU00Metadata):
+        try:
+            case_name_xpath = '//*[@id="caseName"]'
+            try:
+                field = self.wait.until(EC.presence_of_element_located((By.XPATH, case_name_xpath)))
+                existing_case_name = self.wait_for_existing_field_text(case_name_xpath, timeout=6)
+                if existing_case_name:
+                    logging.info(f"MOSU00 Case Name already present; leaving unchanged: {existing_case_name[:120]}")
+                else:
+                    if field.is_enabled() and field.get_attribute("readonly") != "true":
+                        field.clear()
+                        field.send_keys("RE")
+                        logging.info("MOSU00 Case Name was blank; set to RE.")
+                    else:
+                        logging.info("Skipped MOSU00 Case Name because it is not interactable.")
+            except Exception:
+                logging.error("Error setting MOSU00 case name")
+
+            if not self.select_source_detail(mosu00_metadata.source_detail):
+                return False
+
+            comment_parts = []
+            if mosu00_metadata.comments_text:
+                comment_parts.append(mosu00_metadata.comments_text)
+
+            additional_comments = str(row.get("Comments", "")).strip()
+            if additional_comments and additional_comments.lower() != "nan":
+                comment_parts.append(additional_comments)
+
+            if comment_parts and not self.append_comments(comment_parts, "MOSU00"):
+                return False
+
+            return self.configure_mosu00_table_case(mosu00_metadata)
+        except Exception as e:
+            logging.error(f"Error handling MOSU00 table fields: {e}")
+            return False
+
+    def configure_mosu00_table_case(self, mosu00_metadata: MOSU00Metadata):
+        child_dockets = [str(docket).strip() for docket in (mosu00_metadata.child_dockets or ()) if str(docket).strip()]
+        if not child_dockets:
+            logging.error("MOSU00 table metadata does not contain child docket numbers.")
+            return False
+
+        try:
+            table_checkbox = WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, '//*[@id="tableCases"]'))
+            )
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", table_checkbox)
+            if not table_checkbox.is_selected():
+                try:
+                    table_checkbox.click()
+                except Exception:
+                    self.driver.execute_script("arguments[0].click();", table_checkbox)
+                logging.info("Enabled MOSU00 Table Case checkbox.")
+            else:
+                logging.info("MOSU00 Table Case checkbox was already enabled.")
+
+            if not self.click_mosu00_table_create_button():
+                return False
+            logging.info("Opened MOSU00 Table Case Entry form.")
+
+            self.wait_for_mosu00_table_case_form()
+
+            if not self.clear_and_fill_input('//*[@id="tableCaseNums"]', str(len(child_dockets))):
+                logging.error("Could not fill MOSU00 child LNI count.")
+                return False
+
+            if not self.click_mosu00_table_submit_button():
+                return False
+            logging.info("Submitted MOSU00 child LNI count: %d", len(child_dockets))
+            self.wait_for_mosu00_table_case_spinner(timeout=20)
+
+            for index, docket in enumerate(child_dockets):
+                field_xpath = f'//*[@id="tcDocketNum{index}"]'
+                field = WebDriverWait(self.driver, 30).until(
+                    EC.presence_of_element_located((By.XPATH, field_xpath))
+                )
+                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", field)
+                WebDriverWait(self.driver, 10).until(lambda d, item=field: item.is_enabled() and item.get_attribute("readonly") != "true")
+                field.clear()
+                field.send_keys(docket)
+                logging.info("Filled MOSU00 child docket %d/%d: %s", index + 1, len(child_dockets), docket)
+                field.send_keys(Keys.TAB)
+                self.wait_for_mosu00_table_case_spinner(timeout=20)
+
+            if not self.click_mosu00_table_case_save_button():
+                return False
+
+            self.accept_mosu00_table_case_save_confirmation(expected_count=len(child_dockets))
+            self.wait_for_mosu00_table_case_spinner(timeout=25)
+            logging.info("MOSU00 table child docket form saved successfully.")
+            return True
+        except Exception as e:
+            logging.error(f"Error configuring MOSU00 table child LNIs: {e}")
+            return False
+
+    def click_mosu00_table_create_button(self):
+        return self.click_mosu00_table_dialog_button(
+            '//*[@id="Create"]',
+            "Create/Edit",
+            "MOSU00 Table Case Entry Create/Edit",
+        )
+
+    def click_mosu00_table_submit_button(self):
+        return self.click_mosu00_table_dialog_button(
+            '//*[@id="addTableCaseNumber"]',
+            "Submit",
+            "MOSU00 child LNI count Submit",
+        )
+
+    def click_mosu00_table_dialog_button(self, xpath, button_name, log_label):
+        """Click MOSU00 table-case buttons even when the IRT fieldset intercepts native clicks."""
+        try:
+            button = WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, xpath))
+            )
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", button)
+            self.wait_for_mosu00_table_case_spinner(timeout=8)
+
+            if not button.is_enabled():
+                logging.error("%s button is present but disabled.", log_label)
+                return False
+
+            click_attempts = (
+                ("native", lambda item: item.click()),
+                ("action", lambda item: ActionChains(self.driver).move_to_element(item).pause(0.2).click().perform()),
+                ("javascript", lambda item: self.driver.execute_script("arguments[0].click();", item)),
+            )
+            for method_name, click_method in click_attempts:
+                try:
+                    click_method(button)
+                    logging.info("Clicked %s button using %s click.", log_label, method_name)
+                    return True
+                except Exception as exc:
+                    logging.info("%s %s click failed: %s", log_label, method_name, exc)
+
+            logging.error("Could not click %s button after native/action/javascript attempts.", log_label)
+            return False
+        except Exception as e:
+            logging.error("Could not locate MOSU00 table %s button: %s", button_name, e)
+            return False
+
+    def wait_for_mosu00_table_case_form(self):
+        header_xpath = "//*[contains(normalize-space(.), 'Choose Number of Child LNIs')]"
+        WebDriverWait(self.driver, 20).until(EC.presence_of_element_located((By.XPATH, header_xpath)))
+        logging.info("MOSU00 Table Case Entry form is visible.")
+
+    def wait_for_mosu00_table_case_spinner(self, timeout=15):
+        try:
+            WebDriverWait(self.driver, timeout).until(
+                lambda d: d.execute_script(
+                    """
+                    const selectors = [
+                        '.blockUI', '.ui-progressbar',
+                        '.throbber', '.spinner', '.loading', '.ajax-loader',
+                        '#throbber', '#loading'
+                    ];
+                    const visible = selectors.some((selector) => {
+                        return Array.from(document.querySelectorAll(selector)).some((el) => {
+                            const style = window.getComputedStyle(el);
+                            const rect = el.getBoundingClientRect();
+                            return style.display !== 'none'
+                                && style.visibility !== 'hidden'
+                                && style.opacity !== '0'
+                                && rect.width > 0
+                                && rect.height > 0;
+                        });
+                    });
+                    const jqueryBusy = window.jQuery ? window.jQuery.active > 0 : false;
+                    return !visible && !jqueryBusy;
+                    """
+                )
+            )
+            time.sleep(0.4)
+            return True
+        except Exception:
+            logging.info("MOSU00 table form spinner/loading wait timed out; proceeding with field checks.")
+            return False
+
+    def click_mosu00_table_case_save_button(self):
+        self.clear_mosu00_duplicate_dialog_before_table_save()
+        self.wait_for_mosu00_table_case_spinner(timeout=8)
+        if self.click_mosu00_table_save_with_dom_fallback():
+            return True
+
+        uppercase = "'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'"
+        save_xpaths = [
+            (
+                "//div[contains(@class, 'ui-dialog') and .//*[contains(normalize-space(.), 'Choose Number of Child LNIs')]]"
+                f"//button[.//span[translate(normalize-space(.), {uppercase})='SAVE'] or translate(normalize-space(.), {uppercase})='SAVE']"
+            ),
+            f"//span[contains(@class, 'ui-button-text') and translate(normalize-space(.), {uppercase})='SAVE']/ancestor::button[1]",
+            f"//span[contains(@class, 'ui-button-text') and translate(normalize-space(.), {uppercase})='SAVE']",
+            f"//button[.//span[translate(normalize-space(.), {uppercase})='SAVE'] or translate(normalize-space(.), {uppercase})='SAVE']",
+            "/html/body/div[16]/div[11]/div/button[1]",
+            "/html/body/div[16]/div[11]/div/button[1]/span",
+            "/html/body/div[17]/div[11]/div/button[1]",
+            "/html/body/div[17]/div[11]/div/button[1]/span",
+        ]
+
+        for xpath in save_xpaths:
+            try:
+                button = WebDriverWait(self.driver, 3).until(EC.element_to_be_clickable((By.XPATH, xpath)))
+                button.click()
+                logging.info("Clicked MOSU00 Table Case Entry Save button.")
+                return True
+            except Exception:
+                continue
+
+        self.log_mosu00_table_dialog_diagnostics()
+        logging.error("Could not click MOSU00 Table Case Entry Save button.")
+        return False
+
+    def clear_mosu00_duplicate_dialog_before_table_save(self):
+        """Clear duplicate dialogs that can appear after MOSU00 child docket entry."""
+        try:
+            duplicate_visible = self.driver.execute_script(
+                """
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none'
+                        && style.visibility !== 'hidden'
+                        && style.opacity !== '0'
+                        && rect.width > 0
+                        && rect.height > 0;
+                };
+                const dialogs = Array.from(document.querySelectorAll('.ui-dialog, [role="dialog"]')).filter(isVisible);
+                return dialogs.some((dialog) => /duplicate/i.test(dialog.innerText || dialog.textContent || ''))
+                    || Array.from(document.querySelectorAll('#processDuplicate')).some((el) => {
+                        const dialog = el.closest ? el.closest('.ui-dialog') : null;
+                        return dialog && isVisible(dialog);
+                    });
+                """
+            )
+            if duplicate_visible:
+                logging.info("MOSU00 table Save is blocked by a duplicate dialog; processing it as New before saving child LNIs.")
+                self.handle_duplicate_overlay(archive_as_duplicate=False)
+        except Exception as e:
+            logging.info("MOSU00 duplicate-dialog pre-save check failed; continuing to Save attempts: %s", e)
+
+    def click_mosu00_table_save_with_dom_fallback(self):
+        """Find and click the Save button in the active MOSU00 table dialog by DOM context."""
+        try:
+            result = self.driver.execute_script(
+                """
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none'
+                        && style.visibility !== 'hidden'
+                        && style.opacity !== '0'
+                        && rect.width > 0
+                        && rect.height > 0;
+                };
+                const labelFor = (el) => {
+                    return (el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || '').trim();
+                };
+                const dialogs = Array.from(document.querySelectorAll('.ui-dialog, [role="dialog"]')).filter(isVisible);
+                const dialog = dialogs.find((item) => {
+                    const text = (item.innerText || item.textContent || '').toLowerCase();
+                    return text.includes('choose number of child lnis')
+                        || item.querySelector('#tableCaseNums')
+                        || item.querySelector('[id^="tcDocketNum"]');
+                }) || dialogs[dialogs.length - 1] || document;
+
+                const candidates = Array.from(dialog.querySelectorAll(
+                    'button, input[type="button"], input[type="submit"], a, span.ui-button-text'
+                )).filter(isVisible);
+
+                const saveTextCandidate = candidates.find((item) => /\\bsave\\b/i.test(labelFor(item)));
+                let target = saveTextCandidate || null;
+                if (target && target.tagName && target.tagName.toLowerCase() === 'span') {
+                    target = target.closest('button, a') || target;
+                }
+
+                if (!target) {
+                    const paneButton = Array.from(dialog.querySelectorAll('.ui-dialog-buttonpane button')).find(isVisible);
+                    target = paneButton || null;
+                }
+
+                if (!target) {
+                    return {
+                        clicked: false,
+                        reason: 'No visible Save candidate found',
+                        dialogText: (dialog.innerText || dialog.textContent || '').trim().slice(0, 500),
+                        buttons: candidates.map(labelFor).filter(Boolean).slice(0, 20)
+                    };
+                }
+
+                target.scrollIntoView({block: 'center', inline: 'center'});
+                target.click();
+                return {
+                    clicked: true,
+                    label: labelFor(target),
+                    tag: target.tagName,
+                    id: target.id || '',
+                    className: target.className || ''
+                };
+                """
+            )
+            if isinstance(result, dict) and result.get("clicked"):
+                logging.info("Clicked MOSU00 Table Case Entry Save button using DOM fallback: %s", result)
+                return True
+            logging.info("MOSU00 Table Case Entry Save DOM fallback did not click: %s", result)
+            return False
+        except Exception as e:
+            logging.info("MOSU00 Table Case Entry Save DOM fallback failed: %s", e)
+            return False
+
+    def log_mosu00_table_dialog_diagnostics(self):
+        try:
+            diagnostics = self.driver.execute_script(
+                """
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none'
+                        && style.visibility !== 'hidden'
+                        && style.opacity !== '0'
+                        && rect.width > 0
+                        && rect.height > 0;
+                };
+                return Array.from(document.querySelectorAll('.ui-dialog, [role="dialog"]'))
+                    .filter(isVisible)
+                    .map((dialog) => ({
+                        id: dialog.id || '',
+                        className: dialog.className || '',
+                        text: (dialog.innerText || dialog.textContent || '').trim().slice(0, 700),
+                        buttons: Array.from(dialog.querySelectorAll('button, input[type="button"], input[type="submit"], a, span.ui-button-text'))
+                            .filter(isVisible)
+                            .map((button) => ({
+                                tag: button.tagName,
+                                id: button.id || '',
+                                className: button.className || '',
+                                text: (button.innerText || button.textContent || button.value || button.getAttribute('aria-label') || '').trim()
+                            }))
+                    }))
+                    .slice(0, 5);
+                """
+            )
+            logging.warning("MOSU00 table dialog diagnostics before save failure: %s", diagnostics)
+        except Exception as e:
+            logging.warning("Could not collect MOSU00 table dialog diagnostics: %s", e)
+
+    def accept_mosu00_table_case_save_confirmation(self, expected_count=None):
+        try:
+            alert = WebDriverWait(self.driver, 6).until(EC.alert_is_present())
+            alert_text = alert.text.strip()
+            alert.accept()
+            logging.info("Accepted MOSU00 table save confirmation alert: %s", alert_text)
+            return True
+        except TimeoutException:
+            pass
+        except Exception as e:
+            logging.info("MOSU00 table save browser alert check failed: %s", e)
+
+        uppercase = "'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'"
+        ok_xpaths = [
+            (
+                "//div[contains(@class, 'ui-dialog') and "
+                "contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'SAVE')]"
+                f"//button[.//span[translate(normalize-space(.), {uppercase})='OK'] or translate(normalize-space(.), {uppercase})='OK']"
+            ),
+            f"//button[.//span[translate(normalize-space(.), {uppercase})='OK'] or translate(normalize-space(.), {uppercase})='OK']",
+        ]
+
+        for xpath in ok_xpaths:
+            try:
+                ok_button = WebDriverWait(self.driver, 6).until(EC.element_to_be_clickable((By.XPATH, xpath)))
+                ok_button.click()
+                logging.info("Accepted MOSU00 table save confirmation popup.")
+                return True
+            except Exception:
+                continue
+
+        logging.info("No MOSU00 table save confirmation popup was visible.")
+        return False
+
     def handle_itc_fields(self, row, itc_metadata: ITCMetadata):
         try:
             case_name_xpath = '//*[@id="caseName"]'
@@ -4061,7 +4822,7 @@ class CaseLawRouter:
         except Exception as e:
             logging.error(f"Unhandled error in submit_irt_form()")
 
-    def process_rows(self, full_df, file_path, update_progress, dar_mode=False, wc_mode=False, mspb_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False):
+    def process_rows(self, full_df, file_path, update_progress, dar_mode=False, wc_mode=False, mspb_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mosu00_mode=False):
         counsel_df, main_df = None, None
         try:
             self.full_df = full_df
@@ -4170,6 +4931,72 @@ class CaseLawRouter:
                     total_mins = int(mnsutb_duration // 60)
                     total_secs = int(mnsutb_duration % 60)
                     logging.info("[MNSUTB PROCESSING SUMMARY] MNSUTB: %d LNIs successfully routed in %dm %ds", mnsutb_count, total_mins, total_secs)
+                return counsel_df, main_df
+
+            if mosu00_mode:
+                logging.info("=== Starting MOSU00 Counsel Batch ===")
+                if self.set_status:
+                    self.set_status("Counsel Batch Started")
+                counsel_count, counsel_duration = self.process_batch(
+                    counsel_df,
+                    full_df,
+                    file_path,
+                    update_progress,
+                    "counsel",
+                    dar_mode,
+                    wc_mode,
+                    mosu00_mode=True,
+                )
+
+                main_df, deferred_main_rows = defer_main_rows_with_failed_counsel(
+                    main_df,
+                    full_df,
+                    dar_mode=dar_mode,
+                    wc_mode=wc_mode,
+                )
+                if deferred_main_rows:
+                    logging.warning(
+                        "Deferred %d MOSU00 main opinion row(s) because required counsel did not finish cleanly.",
+                        len(deferred_main_rows),
+                    )
+
+                if self.set_status:
+                    self.set_status("Counsel Batch Processed")
+
+                try:
+                    while len(self.driver.window_handles) > 1:
+                        self.driver.switch_to.window(self.driver.window_handles[-1])
+                        self.driver.close()
+                        self.driver.switch_to.window(self.driver.window_handles[0])
+                    logging.info("Cleaned up all leftover popup windows before MOSU00 main/table batch.")
+                except Exception:
+                    logging.warning("Failed to clean up extra windows before MOSU00 main/table batch.")
+
+                logging.info("=== Starting MOSU00 Main/Table Batch ===")
+                if self.set_status:
+                    self.set_status("MOSU00 Batch Started")
+                mosu00_count, mosu00_duration = self.process_batch(
+                    main_df,
+                    full_df,
+                    file_path,
+                    update_progress,
+                    "mosu00",
+                    dar_mode,
+                    wc_mode,
+                    mosu00_mode=True,
+                )
+                if self.set_status:
+                    self.set_status("MOSU00 Batch Processed")
+
+                total_count = counsel_count + mosu00_count
+                total_time = counsel_duration + mosu00_duration
+                if total_count > 0:
+                    overall_avg = total_time / total_count
+                    overall_est_per_hour = int(3600 / overall_avg) if overall_avg else 0
+                    logging.info("[MOSU00 PROCESSING SUMMARY] TOTAL: %d LNIs successfully routed in %dm %ds", total_count, int(total_time // 60), int(total_time % 60))
+                    logging.info("    - Counsel: %d LNIs in %dm %ds", counsel_count, int(counsel_duration // 60), int(counsel_duration % 60))
+                    logging.info("    - Main/Table: %d LNIs in %dm %ds", mosu00_count, int(mosu00_duration // 60), int(mosu00_duration % 60))
+                    logging.info("    - Overall Avg: %.1fs/LNI -> Est. %d LNIs/hour", overall_avg, overall_est_per_hour)
                 return counsel_df, main_df
 
             logging.info("=== Starting Counsel Batch ===")

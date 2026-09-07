@@ -21,6 +21,7 @@ from .itc_extractor import is_itc_row
 from .irsplr_extractor import is_irsplr_row
 from .ohtax0_extractor import is_ohtax0_row
 from .mnsutb_extractor import is_mnsutb_row
+from .mosu00_extractor import is_mosu00_row, is_mosu00_table_filename
 
 
 STATUS_DONE = "DONE"
@@ -77,6 +78,8 @@ def mode_scope_df(df: pd.DataFrame | None, mode: str | None) -> pd.DataFrame:
         return df[df.apply(is_ohtax0_row, axis=1)].copy()
     if normalized_mode == "mnsutb":
         return df[df.apply(is_mnsutb_row, axis=1)].copy()
+    if normalized_mode == "mosu00":
+        return df[df.apply(is_mosu00_row, axis=1)].copy()
     return df.copy()
 
 
@@ -241,6 +244,10 @@ def defer_main_rows_with_failed_counsel(
             continue
 
         file_name = str(row.get("FileName", "") or row.get("File Name", "") or "")
+        if is_mosu00_table_filename(file_name):
+            keep_indices.append(idx)
+            continue
+
         docket = extract_docket_number(file_name, dar_mode, wc_mode)
         if not docket:
             keep_indices.append(idx)

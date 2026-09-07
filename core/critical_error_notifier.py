@@ -152,6 +152,7 @@ def _document_result_label(mode):
         "irsplr": "IRSPLR documents",
         "ohtax0": "OHTAX0 documents",
         "mnsutb": "MNSUTB documents",
+        "mosu00": "MOSU main/table documents",
     }
     return labels.get(normalized, "Main opinions")
 
@@ -168,6 +169,7 @@ def _mode_display_name(mode):
         "irsplr": "IRSPLR Autorouter",
         "ohtax0": "OHTAX0 Autorouter",
         "mnsutb": "MNSUTB Autorouter",
+        "mosu00": "MOSU Autorouter",
         "dar": "DAR Autoruter",
         "smd": "SMD Autorouter",
     }
@@ -1225,6 +1227,8 @@ def notify_critical_error(
 def _write_run_summary(report_dir, payload, log_copy=None):
     summary_path = report_dir / "Run Summary.txt"
     counts = payload.get("result_counts") or {}
+    document_label = _document_result_label(payload.get("mode"))
+    document_sentence_label = document_label[:1].upper() + document_label[1:] if document_label else "Main opinions"
     lines = [
         "SMD Autorouter Run Summary",
         "=" * 28,
@@ -1237,11 +1241,11 @@ def _write_run_summary(report_dir, payload, log_copy=None):
         "Result Counts",
         "-------------",
         f"Counsel successfully routed: {counts.get('counsel_success', 0)}",
-        f"Main opinions successfully routed: {counts.get('main_success', 0)}",
+        f"{document_sentence_label} successfully routed: {counts.get('main_success', 0)}",
         f"Counsel already processed: {counts.get('counsel_already', 0)}",
-        f"Main opinions already processed: {counts.get('main_already', 0)}",
+        f"{document_sentence_label} already processed: {counts.get('main_already', 0)}",
         f"Counsel related-LNI timeouts: {counts.get('counsel_timeout', 0)}",
-        f"Main related-LNI timeouts: {counts.get('main_timeout', 0)}",
+        f"{document_sentence_label} related-LNI timeouts: {counts.get('main_timeout', 0)}",
         "",
         "Context",
         "-------",
