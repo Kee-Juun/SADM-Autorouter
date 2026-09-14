@@ -90,6 +90,11 @@ def normalize_itc_docket(raw_docket) -> Optional[str]:
     docket = normalize_itc_text(raw_docket)
     docket = re.sub(r"\s+", "", str(docket).strip().upper())
     docket = re.sub(r"-+", "-", docket)
+
+    misc_match = re.fullmatch(r"MISC-(\d{1,5})", docket)
+    if misc_match:
+        return f"MISC-{misc_match.group(1)}"
+
     match = re.fullmatch(r"(\d{3})-(?:TA-)?(\d+)", docket)
     if not match:
         return None
@@ -103,10 +108,16 @@ def normalize_itc_docket(raw_docket) -> Optional[str]:
 def extract_itc_docket_from_filename(file_name) -> Optional[str]:
     name = Path(str(file_name or "")).name
     match = re.search(
-        r"^(?:itc000|itcalj)_(\d{3}-\d+)_\d{8}(?:_\d+)?\.pdf$",
+        r"^itc000_(MISC-\d{1,5})_\d{8}(?:_\d+)?\.pdf$",
         name,
         re.IGNORECASE,
     )
+    if not match:
+        match = re.search(
+            r"^(?:itc000|itcalj)_(\d{3}-\d+)_\d{8}(?:_\d+)?\.pdf$",
+            name,
+            re.IGNORECASE,
+        )
     if not match:
         return None
     return normalize_itc_docket(match.group(1))
@@ -151,7 +162,7 @@ def parse_itc_document_text(
     court = get_itc_court(filename_hint, court_code_hint)
     content_fingerprint = compute_itc_content_fingerprint(text)
     has_text_content = bool(content_fingerprint)
-    content_docket = extract_primary_itc_docket(text)
+    content_docket = extract_primary_itc_docket(text, court)
     docket_number, used_filename_docket_fallback = resolve_itc_docket_number(
         text,
         filename_hint,
@@ -244,8 +255,10 @@ def should_use_itc_filename_docket_fallback(text: str, filename_docket: str, cou
     return True
 
 
-def extract_primary_itc_docket(text: str) -> Optional[str]:
+def extract_primary_itc_docket(text: str, court: Optional[str] = None) -> Optional[str]:
     numbers = extract_itc_docket_numbers(text)
+    if str(court or "").strip().upper() == "FDITCALJ":
+        numbers = [number for number in numbers if not number.startswith("MISC-")]
     return numbers[0] if numbers else None
 
 
@@ -291,6 +304,11 @@ def extract_itc_docket_numbers(text: str) -> list[str]:
                 numbers.append(docket)
 
     for match in re.finditer(r"\b(332\s*-\s*\d{2,5})\b", text, re.IGNORECASE):
+        docket = normalize_itc_docket(match.group(1))
+        if docket and docket not in numbers:
+            numbers.append(docket)
+
+    for match in re.finditer(r"\b(MISC\s*-\s*\d{1,5})\b", text, re.IGNORECASE):
         docket = normalize_itc_docket(match.group(1))
         if docket and docket not in numbers:
             numbers.append(docket)

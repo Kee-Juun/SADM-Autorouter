@@ -84,6 +84,8 @@ def main():
                 app_name = "OHTAX0 Autorouter"
             elif mode == "mnsutb":
                 app_name = "MNSUTB Autorouter"
+            elif mode == "mework":
+                app_name = "MEWORK Autorouter"
             elif mode == "mosu00":
                 app_name = "MOSU Autorouter"
             elif mode == "dar":

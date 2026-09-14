@@ -358,6 +358,8 @@ def spark_burst(base: Image.Image, center, t: float, palette, seed=0, count=10, 
 
 
 def save_frame(effect: str, index: int, image: Image.Image) -> None:
+    effect_dir = OUT_DIR / effect
+    effect_dir.mkdir(parents=True, exist_ok=True)
     out = image.resize((SIZE, SIZE), Image.Resampling.LANCZOS)
     r, g, b, a = out.split()
     r = r.point(lambda value: min(255, int(value * 1.16)))
@@ -365,7 +367,7 @@ def save_frame(effect: str, index: int, image: Image.Image) -> None:
     b = b.point(lambda value: min(255, int(value * 1.16)))
     a = a.point(lambda value: 0 if value < 8 else min(255, int(value * 1.38)))
     out = Image.merge("RGBA", (r, g, b, a))
-    out.save(OUT_DIR / effect / f"{index:02d}.png", compress_level=4)
+    out.save(effect_dir / f"{index:02d}.png", compress_level=4)
 
 
 def cleanup_output() -> None:
@@ -2220,9 +2222,36 @@ GENERATORS = {
     "midnight_operator_neon_fumes": midnight_operator_neon_fumes,
 }
 
+NEW_PROGRESSION_EFFECTS = (
+    "unbroken_circuit_plasma",
+    "flawless_dynasty_radiance",
+    "smd_constellation_air",
+    "dar_dual_current",
+    "mspb_merit_aura",
+    "itc_trade_tide",
+    "irsplr_oracle_bloom",
+    "ohtax_tribunal_heat",
+    "mnsutb_matrix_growth",
+    "mosu_bench_beacon",
+    "pristine_ledger_breeze",
+    "crystal_archive_frost",
+    "untarnished_dominion_light",
+    "back_online_pulse",
+    "phoenix_protocol_embers",
+    "resilience_engine_earth",
+    "swift_filing_wind",
+    "velocity_protocol_plasma",
+    "warp_docket_portal",
+    "archive_colossus_dust",
+    "ten_thousand_radiance",
+    "endless_index_void",
+    "docket_singularity_gravity",
+)
+GENERATORS.update({effect: _sprite_render(effect) for effect in NEW_PROGRESSION_EFFECTS})
+
 
 def main() -> None:
-    ensure_material_sprites(force=True)
+    ensure_material_sprites(force=False)
     cleanup_output()
     for effect, generator in GENERATORS.items():
         for index in range(FRAME_COUNT):

@@ -25,6 +25,7 @@ from .smducar_config import (
     status_updates_buffer,
     mspb_metadata_buffer,
     itc_content_fingerprint_buffer,
+    mework_content_fingerprint_buffer,
     error_log_entries,
 )
 
@@ -57,6 +58,10 @@ from .ohtax0_extractor import (
 
 from .mnsutb_extractor import (
     is_mnsutb_row,
+)
+
+from .mework_extractor import (
+    is_mework_row,
 )
 
 from .mosu00_extractor import (
@@ -155,7 +160,7 @@ def _get_parallel_router_count(config):
     return max(1, min(requested_routers, MAX_PARALLEL_ROUTERS))
 
 
-def _get_mode_router_label(dar_mode=False, mspb_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mosu00_mode=False):
+def _get_mode_router_label(dar_mode=False, mspb_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
     if mspb_mode:
         return "MSPB"
     if itc_mode:
@@ -166,6 +171,8 @@ def _get_mode_router_label(dar_mode=False, mspb_mode=False, itc_mode=False, irsp
         return "OHTAX0"
     if mnsutb_mode:
         return "MNSUTB"
+    if mework_mode:
+        return "MEWORK"
     if mosu00_mode:
         return "MOSU00"
     if dar_mode:
@@ -305,11 +312,11 @@ def _completed_status_mask(df):
     return df["Status"].astype(str).str.strip().str.upper().isin(COMPLETED_ROW_STATUSES)
 
 
-def _select_parallel_document_rows(df_filtered, full_df, limit, dar_mode=False, wc_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mosu00_mode=False):
+def _select_parallel_document_rows(df_filtered, full_df, limit, dar_mode=False, wc_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
     selected = _select_parallel_rows(df_filtered, limit)
     if selected.empty:
         return selected
-    if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode:
+    if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode:
         return selected
 
     selected_indices = set(selected.index)
@@ -357,9 +364,9 @@ def _select_parallel_document_rows(df_filtered, full_df, limit, dar_mode=False, 
     return selected
 
 
-def _is_counsel_result_row(row, mspb_mode, dar_mode, wc_mode, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mosu00_mode=False):
+def _is_counsel_result_row(row, mspb_mode, dar_mode, wc_mode, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
     """Return True when a result row should be counted under the counsel bucket."""
-    if mspb_mode or itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode:
+    if mspb_mode or itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode:
         return False
     return is_counsel(str(row.get("FileName", "")), dar_mode, wc_mode)
 
@@ -368,7 +375,7 @@ def _empty_result_counts():
     return (0, 0, 0, 0, 0, 0)
 
 
-def _count_results_for_rows(df, mspb_mode, dar_mode, wc_mode, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mosu00_mode=False, current_run_only=False):
+def _count_results_for_rows(df, mspb_mode, dar_mode, wc_mode, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False, current_run_only=False):
     counsel_success = 0
     main_success = 0
     counsel_already = 0
@@ -389,6 +396,7 @@ def _count_results_for_rows(df, mspb_mode, dar_mode, wc_mode, itc_mode=False, ir
             irsplr_mode=irsplr_mode,
             ohtax0_mode=ohtax0_mode,
             mnsutb_mode=mnsutb_mode,
+            mework_mode=mework_mode,
             mosu00_mode=mosu00_mode,
         )
         status = str(status_updates_buffer.get(idx, str(row.get("Status", "")))).strip()
@@ -460,6 +468,7 @@ def _write_router_split_workbook(router_id, batch_type, router_df, output_dir):
             else "IRSPLR Split" if batch_type == "irsplr"
             else "OHTAX0 Split" if batch_type == "ohtax0"
             else "MNSUTB Split" if batch_type == "mnsutb"
+            else "MEWORK Split" if batch_type == "mework"
             else "Counsel Split" if batch_type == "counsel"
             else "Main Split"
         )
@@ -544,6 +553,7 @@ def _write_router_split_workbook(router_id, batch_type, router_df, output_dir):
                     else "IRSPLR" if batch_type == "irsplr"
                     else "OHTAX0" if batch_type == "ohtax0"
                     else "MNSUTB" if batch_type == "mnsutb"
+                    else "MEWORK" if batch_type == "mework"
                     else "Counsel" if batch_type == "counsel"
                     else "Main Opinion"
                 ),
@@ -762,7 +772,7 @@ def _run_parallel_mspb_workflow(update_progress=None, set_status=None, show_succ
 
 def _run_document_router_phase(router_id, batch_type, router_df, full_df, latest_excel, config, driver_path, env_url,
                                create_router, show_error, set_status, update_progress, dar_mode, wc_mode, mode_label,
-                               irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mosu00_mode=False):
+                               irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
     driver = None
     router_name = f"{mode_label} Router {router_id}"
     _set_worker_log_label(router_name)
@@ -797,6 +807,8 @@ def _run_document_router_phase(router_id, batch_type, router_df, full_df, latest
         router.ohtax0_download_dir.mkdir(parents=True, exist_ok=True)
         router.mnsutb_download_dir = download_dir / "MNSUTB PDF Downloads"
         router.mnsutb_download_dir.mkdir(parents=True, exist_ok=True)
+        router.mework_download_dir = download_dir / "MEWORK PDF Downloads"
+        router.mework_download_dir.mkdir(parents=True, exist_ok=True)
         router.mosu00_download_dir = download_dir / "MOSU00 HTML Downloads"
         router.mosu00_download_dir.mkdir(parents=True, exist_ok=True)
         router.full_df = full_df
@@ -814,6 +826,7 @@ def _run_document_router_phase(router_id, batch_type, router_df, full_df, latest
             irsplr_mode=irsplr_mode,
             ohtax0_mode=ohtax0_mode,
             mnsutb_mode=mnsutb_mode,
+            mework_mode=mework_mode,
             mosu00_mode=mosu00_mode,
         )
         logging.info(f"Completed {batch_type} batch.")
@@ -850,7 +863,7 @@ def _run_document_router_phase(router_id, batch_type, router_df, full_df, latest
 
 def _run_parallel_document_phase(batch_type, phase_df, full_df, latest_excel, config, driver_path, env_url,
                                  requested_routers, update_progress, create_router, show_error, set_status,
-                                 dar_mode, wc_mode, mode_label, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mosu00_mode=False):
+                                 dar_mode, wc_mode, mode_label, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
     if phase_df.empty:
         if update_progress:
             update_progress(batch_type, 0, 0)
@@ -901,6 +914,7 @@ def _run_parallel_document_phase(batch_type, phase_df, full_df, latest_excel, co
                 irsplr_mode,
                 ohtax0_mode,
                 mnsutb_mode,
+                mework_mode,
                 mosu00_mode,
             ))
 
@@ -914,7 +928,7 @@ def _run_parallel_document_phase(batch_type, phase_df, full_df, latest_excel, co
 
 def _run_parallel_document_workflow(update_progress=None, set_status=None, show_success=None, show_error=None,
                                     create_router=None, latest_excel=None, df=None, df_filtered=None, config=None,
-                                    dar_mode=False, wc_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mosu00_mode=False):
+                                    dar_mode=False, wc_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
     config = config or load_config()
     df_filtered = df_filtered if df_filtered is not None else df
 
@@ -930,6 +944,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
         irsplr_mode=irsplr_mode,
         ohtax0_mode=ohtax0_mode,
         mnsutb_mode=mnsutb_mode,
+        mework_mode=mework_mode,
         mosu00_mode=mosu00_mode,
     )
 
@@ -939,7 +954,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
             show_error("Parallel router mode found no valid LNI rows to process.")
         return pd.DataFrame(), pd.DataFrame()
 
-    if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode:
+    if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode:
         counsel_df = selected_df.iloc[0:0].copy()
         main_df = selected_df.copy()
     else:
@@ -950,6 +965,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
         irsplr_mode=irsplr_mode,
         ohtax0_mode=ohtax0_mode,
         mnsutb_mode=mnsutb_mode,
+        mework_mode=mework_mode,
         mosu00_mode=mosu00_mode,
     )
     logging.info(
@@ -969,10 +985,10 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
         "staging": "https://tcfabstaging.lexisnexis.com/shared/InventoryInvoicing/"
     }.get(config.get("environment", "prod"))
 
-    if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode:
+    if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode:
         counsel_count = 0
         counsel_duration = 0
-        batch_type = "itc" if itc_mode else "irsplr" if irsplr_mode else "ohtax0" if ohtax0_mode else "mnsutb"
+        batch_type = "itc" if itc_mode else "irsplr" if irsplr_mode else "ohtax0" if ohtax0_mode else "mnsutb" if mnsutb_mode else "mework"
         logging.info("=== Starting Parallel %s Batch ===", mode_label)
         if set_status:
             set_status(f"{mode_label} Batch Started")
@@ -995,6 +1011,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
             irsplr_mode=irsplr_mode,
             ohtax0_mode=ohtax0_mode,
             mnsutb_mode=mnsutb_mode,
+            mework_mode=mework_mode,
             mosu00_mode=mosu00_mode,
         )
         if set_status:
@@ -1076,7 +1093,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
             int(total_time // 60),
             int(total_time % 60),
         )
-        if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode:
+        if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode:
             logging.info(
                 "    - %s: %d LNIs in %dm %ds",
                 mode_label,
@@ -1102,7 +1119,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
     if set_status:
         set_status("Success!")
 
-    summary_df = selected_df if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or limit > 0 else df
+    summary_df = selected_df if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode or limit > 0 else df
     rerun_summary = finalize_rerun_ready_statuses(
         df=df,
         latest_excel=None,
@@ -1119,6 +1136,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
         irsplr_mode=irsplr_mode,
         ohtax0_mode=ohtax0_mode,
         mnsutb_mode=mnsutb_mode,
+        mework_mode=mework_mode,
         mosu00_mode=mosu00_mode,
         current_run_only=True,
     )
@@ -1160,7 +1178,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
 
 
 def run_automation_workflow(update_progress=None, set_status=None, show_success=None, show_error=None, total_count=1,
-                            create_router=None, latest_excel=None, df=None, dar_mode=False, wc_mode=False, mspb_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mosu00_mode=False):
+                            create_router=None, latest_excel=None, df=None, dar_mode=False, wc_mode=False, mspb_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
     """
     Main automation workflow that orchestrates the entire process.
     
@@ -1180,6 +1198,7 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
         irsplr_mode: Whether IRSPLR mode is enabled
         ohtax0_mode: Whether OHTAX0 mode is enabled
         mnsutb_mode: Whether MNSUTB mode is enabled
+        mework_mode: Whether MEWORK mode is enabled
         mosu00_mode: Whether MOSU00 mode is enabled
     
     Returns:
@@ -1189,6 +1208,7 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
     status_updates_buffer.clear()
     mspb_metadata_buffer.clear()
     itc_content_fingerprint_buffer.clear()
+    mework_content_fingerprint_buffer.clear()
     error_log_entries.clear()
 
     try:
@@ -1229,6 +1249,13 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
                 if show_error:
                     show_error("MNSUTB Autorouter mode found no STMNSUTB rows to process.")
                 return pd.DataFrame(), pd.DataFrame()
+        elif mework_mode:
+            run_scope_df = df[df.apply(is_mework_row, axis=1)].copy()
+            if run_scope_df.empty:
+                logging.warning("MEWORK Autorouter mode found no STMEWORK rows to process.")
+                if show_error:
+                    show_error("MEWORK Autorouter mode found no STMEWORK rows to process.")
+                return pd.DataFrame(), pd.DataFrame()
         elif mosu00_mode:
             run_scope_df = df[df.apply(is_mosu00_row, axis=1)].copy()
             if run_scope_df.empty:
@@ -1258,7 +1285,7 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
 
         config = load_config()
         headless_mode = config.get("headless", False)
-        current_mode = "mspb" if mspb_mode else "itc" if itc_mode else "irsplr" if irsplr_mode else "ohtax0" if ohtax0_mode else "mnsutb" if mnsutb_mode else "mosu00" if mosu00_mode else "dar" if dar_mode else "smd"
+        current_mode = "mspb" if mspb_mode else "itc" if itc_mode else "irsplr" if irsplr_mode else "ohtax0" if ohtax0_mode else "mnsutb" if mnsutb_mode else "mework" if mework_mode else "mosu00" if mosu00_mode else "dar" if dar_mode else "smd"
         start_critical_error_run(latest_excel=latest_excel, mode=current_mode, config=config)
         logging.info(f"Headless mode setting: {headless_mode}")
 
@@ -1291,6 +1318,7 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
                 irsplr_mode=irsplr_mode,
                 ohtax0_mode=ohtax0_mode,
                 mnsutb_mode=mnsutb_mode,
+                mework_mode=mework_mode,
                 mosu00_mode=mosu00_mode,
             )
 
@@ -1405,7 +1433,7 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
         counsel_df = pd.DataFrame()
         main_df = pd.DataFrame()
 
-        set_status("MSPB Batch Started" if mspb_mode else "ITC Batch Started" if itc_mode else "IRSPLR Batch Started" if irsplr_mode else "OHTAX0 Batch Started" if ohtax0_mode else "MNSUTB Batch Started" if mnsutb_mode else "MOSU00 Batch Started" if mosu00_mode else "Counsel Batch Started")
+        set_status("MSPB Batch Started" if mspb_mode else "ITC Batch Started" if itc_mode else "IRSPLR Batch Started" if irsplr_mode else "OHTAX0 Batch Started" if ohtax0_mode else "MNSUTB Batch Started" if mnsutb_mode else "MEWORK Batch Started" if mework_mode else "MOSU00 Batch Started" if mosu00_mode else "Counsel Batch Started")
         counsel_df, main_df = router.process_rows(
             df_filtered,
             latest_excel,
@@ -1417,6 +1445,7 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
             irsplr_mode=irsplr_mode,
             ohtax0_mode=ohtax0_mode,
             mnsutb_mode=mnsutb_mode,
+            mework_mode=mework_mode,
             mosu00_mode=mosu00_mode,
         )
 
@@ -1436,6 +1465,7 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
             irsplr_mode=irsplr_mode,
             ohtax0_mode=ohtax0_mode,
             mnsutb_mode=mnsutb_mode,
+            mework_mode=mework_mode,
             mosu00_mode=mosu00_mode,
             current_run_only=True,
         )
@@ -1490,7 +1520,7 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
         tb = traceback.format_exc()
         logging.error(f"Unexpected error during Run: {e}")
         logging.error(f"Full traceback: {tb}")
-        current_mode = locals().get("current_mode", "mspb" if mspb_mode else "itc" if itc_mode else "irsplr" if irsplr_mode else "ohtax0" if ohtax0_mode else "mnsutb" if mnsutb_mode else "mosu00" if mosu00_mode else "dar" if dar_mode else "smd")
+        current_mode = locals().get("current_mode", "mspb" if mspb_mode else "itc" if itc_mode else "irsplr" if irsplr_mode else "ohtax0" if ohtax0_mode else "mnsutb" if mnsutb_mode else "mework" if mework_mode else "mosu00" if mosu00_mode else "dar" if dar_mode else "smd")
         rerun_summary = finalize_rerun_ready_statuses(
             df=df,
             latest_excel=latest_excel,

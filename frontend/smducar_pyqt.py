@@ -8,6 +8,7 @@ import threading
 import getpass
 import random
 import math
+import time
 from PyQt5.QtGui import QMovie, QColor, QPen, QLinearGradient
 from PyQt5.QtCore import QThread, QPropertyAnimation, QPoint, QEasingCurve, QBasicTimer, QRect, QSize, QEvent, QTimer, QObject, QAbstractAnimation, pyqtProperty, QCoreApplication
 from PyQt5.QtGui import QCursor
@@ -43,6 +44,7 @@ from utils.rewards import (
     get_reward_image_filename,
     get_visual_settings,
     load_user_rewards,
+    record_failed_run,
     reset_user_rewards,
     save_user_rewards,
     xp_to_next_level,
@@ -783,6 +785,7 @@ class SMDUSAPGui(QMainWindow):
             ("irsplr", "IRSPLR Autorouter"),
             ("ohtax0", "OHTAX0 Autorouter"),
             ("mnsutb", "MNSUTB Autorouter"),
+            ("mework", "MEWORK Autorouter"),
             ("mosu00", "MOSU Autorouter"),
         ]
 
@@ -825,6 +828,11 @@ class SMDUSAPGui(QMainWindow):
     def handle_worker_error(self, message):
         """Release the UI when the automation workflow reports a blocking error."""
         logging.error(message)
+        if self.is_running:
+            try:
+                record_failed_run(load_user_rewards())
+            except Exception:
+                logging.warning("Failed to record the interrupted run for recovery progress.", exc_info=True)
         self.is_running = False
         self._update_run_locked_controls()
         self.start_greeting_updates()
@@ -930,6 +938,9 @@ class SMDUSAPGui(QMainWindow):
         if current_mode == "mnsutb":
             logging.info("Returning MNSUTB Autorouter")
             return "MNSUTB Autorouter"
+        if current_mode == "mework":
+            logging.info("Returning MEWORK Autorouter")
+            return "MEWORK Autorouter"
         if current_mode == "mosu00":
             logging.info("Returning MOSU Autorouter")
             return "MOSU Autorouter"
@@ -953,6 +964,8 @@ class SMDUSAPGui(QMainWindow):
             return "OHTAX0 Documents Auto-Routed"
         if current_mode == "mnsutb":
             return "MNSUTB Documents Auto-Routed"
+        if current_mode == "mework":
+            return "MEWORK Documents Auto-Routed"
         if current_mode == "mosu00":
             return "MOSU Documents Auto-Routed"
         if current_mode == "dar":
@@ -965,12 +978,13 @@ class SMDUSAPGui(QMainWindow):
             from core.smducar import detect_mode
             
             # Count modes in the filenames
-            mode_counts = {"smd": 0, "dar": 0, "mspb": 0, "itc": 0, "irsplr": 0, "ohtax0": 0, "mnsutb": 0, "mosu00": 0, "unknown": 0}
+            mode_counts = {"smd": 0, "dar": 0, "mspb": 0, "itc": 0, "irsplr": 0, "ohtax0": 0, "mnsutb": 0, "mework": 0, "mosu00": 0, "unknown": 0}
             
             for _, row in df.iterrows():
                 filename = str(row.get("FileName", "")).strip()
                 if filename and filename.lower() != "nan":
-                    detected_mode = detect_mode(filename)
+                    court_code = str(row.get("CourtCode", row.get("Court Code", ""))).strip().upper()
+                    detected_mode = "mework" if court_code == "STMEWORK" else detect_mode(filename)
                     mode_counts[detected_mode] = mode_counts.get(detected_mode, 0) + 1
             
             # Determine the most common mode
@@ -981,7 +995,7 @@ class SMDUSAPGui(QMainWindow):
             if total_files > 0 and mode_counts[most_common_mode] > total_files * 0.5:
                 current_mode = self.config.get("mode", "dar" if self.config.get("dar_mode", False) else "smd")
                 target_mode = most_common_mode
-                if most_common_mode in {"dar", "smd", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mosu00"} and target_mode != current_mode:
+                if most_common_mode in {"dar", "smd", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mework", "mosu00"} and target_mode != current_mode:
                     self._set_router_mode_config(target_mode)
                     self.router_mode_signal.emit(target_mode, "auto-detection")
                     logging.info(f"Auto-detected {most_common_mode.upper()} mode from {mode_counts[most_common_mode]}/{total_files} files")
@@ -1007,6 +1021,9 @@ class SMDUSAPGui(QMainWindow):
         elif current_mode == "mnsutb":
             app_name = "MNSUTB"
             process_name = "MNSUTB"
+        elif current_mode == "mework":
+            app_name = "MEWORK"
+            process_name = "MEWORK"
         elif current_mode == "mosu00":
             app_name = "MOSU"
             process_name = "MOSU"
@@ -1068,6 +1085,16 @@ class SMDUSAPGui(QMainWindow):
             lines.append(f"MSPB: {main_already}")
             lines.append("")
             lines.append(summary_closer())
+            return "\n".join(lines)
+
+        if current_mode == "mework":
+            lines = [f"{app_name} Auto-Routing Summary:"]
+            if (main_success or 0) > 0:
+                lines.extend(["", "Successfully auto-routed:", f"MEWORK: {main_success}"])
+            lines.extend(["", "Already processed:", f"MEWORK: {main_already}"])
+            if (main_timeout or 0) > 0:
+                lines.extend(["", "Timeout issues:", f"MEWORK: {main_timeout}"])
+            lines.extend(["", summary_closer()])
             return "\n".join(lines)
 
         if current_mode == "itc":
@@ -2294,6 +2321,7 @@ class SMDUSAPGui(QMainWindow):
             "IRSPLR Batch Started": ("Processing IRSPLR Batch...", 0),
             "OHTAX0 Batch Started": ("Processing OHTAX0 Batch...", 0),
             "MNSUTB Batch Started": ("Processing MNSUTB Batch...", 0),
+            "MEWORK Batch Started": ("Processing MEWORK Batch...", 0),
             "MOSU00 Batch Started": ("Processing MOSU00 Batch...", 0),
             "Success!": ("Automation Complete!", 100),
             "Completed": ("Completed", 100),
@@ -2307,6 +2335,7 @@ class SMDUSAPGui(QMainWindow):
             "IRSPLR Batch Started": "IRSPLR Processed",
             "OHTAX0 Batch Started": "OHTAX0 Processed",
             "MNSUTB Batch Started": "MNSUTB Processed",
+            "MEWORK Batch Started": "MEWORK Processed",
             "MOSU00 Batch Started": "MOSU00 Processed",
         }
 
@@ -2331,6 +2360,7 @@ class SMDUSAPGui(QMainWindow):
             "IRSPLR Processed",
             "OHTAX0 Processed",
             "MNSUTB Processed",
+            "MEWORK Processed",
             "MOSU00 Processed",
         )
         if any(str(message).startswith(prefix) for prefix in allowed_progress_prefixes):
@@ -2367,6 +2397,10 @@ class SMDUSAPGui(QMainWindow):
             self.progress_bar.setValue(percent)
         elif batch == "mnsutb":
             self.progress_label.setText(f"MNSUTB Processed: {current}/{total}")
+            percent = int((current / total) * 100) if total > 0 else 0
+            self.progress_bar.setValue(percent)
+        elif batch == "mework":
+            self.progress_label.setText(f"MEWORK Processed: {current}/{total}")
             percent = int((current / total) * 100) if total > 0 else 0
             self.progress_bar.setValue(percent)
         elif batch == "mosu00":
@@ -2568,6 +2602,7 @@ class SMDUSAPGui(QMainWindow):
 
             self.stop_greeting_updates()
             self.is_running = True
+            self._reward_run_started_at = time.monotonic()
             self._update_run_locked_controls()
             # Start the processing GIF and show automation UI
             self.start_processing_gif()
@@ -2615,6 +2650,7 @@ class SMDUSAPGui(QMainWindow):
                 irsplr_mode=current_mode == "irsplr",
                 ohtax0_mode=current_mode == "ohtax0",
                 mnsutb_mode=current_mode == "mnsutb",
+                mework_mode=current_mode == "mework",
                 mosu00_mode=current_mode == "mosu00",
             )
             self.worker_thread.start()
@@ -2637,6 +2673,10 @@ class SMDUSAPGui(QMainWindow):
                 latest_excel = getattr(self.worker_thread, "latest_excel", None)
                 worker_df = getattr(self.worker_thread, "df", None)
                 logging.critical("User reset automation during an active run. Capturing critical report.")
+                try:
+                    record_failed_run(load_user_rewards())
+                except Exception:
+                    logging.warning("Failed to record reset run for recovery progress.", exc_info=True)
                 if hasattr(self.worker_thread, "request_stop"):
                     self.worker_thread.request_stop()
                 self.worker_thread.terminate()
@@ -2758,6 +2798,18 @@ class SMDUSAPGui(QMainWindow):
                 message += f"Additionally, {main_already} MNSUTB document(s) were already processed.\n\n"
             message += f"Way to go, {user_name}!"
             return message
+
+        if current_mode == "mework":
+            if total_success == 0 and total_already > 0:
+                return f"All MEWORK documents were already processed.\n\nNo new routing needed, {user_name}!"
+            message = (
+                f"Routing completed!\n\n"
+                f"Successfully routed {main_success} new MEWORK document(s).\n\n"
+            )
+            if main_already > 0:
+                message += f"Additionally, {main_already} MEWORK document(s) were already processed.\n\n"
+            message += f"Way to go, {user_name}!"
+            return message
     
         if total_success == 0 and total_already > 0:
             message = (
@@ -2834,6 +2886,10 @@ class SMDUSAPGui(QMainWindow):
                     timeout_count=total_timeouts,
                     mode=current_mode,
                     parallel_routers=parallel_routers,
+                    duration_seconds=max(
+                        0.0,
+                        time.monotonic() - getattr(self, "_reward_run_started_at", time.monotonic()),
+                    ),
                 )
                 self.user_data = load_user_rewards()
 
@@ -2972,6 +3028,8 @@ class SMDUSAPGui(QMainWindow):
                 toast_title = "OHTAX0 Auto-Routing Complete"
             elif current_mode == "mnsutb":
                 toast_title = "MNSUTB Auto-Routing Complete"
+            elif current_mode == "mework":
+                toast_title = "MEWORK Auto-Routing Complete"
             elif current_mode == "mosu00":
                 toast_title = "MOSU Auto-Routing Complete"
             elif current_mode == "dar":
@@ -4767,6 +4825,8 @@ if __name__ == '__main__':
                 app_name = "OHTAX0 Autorouter"
             elif mode == "mnsutb":
                 app_name = "MNSUTB Autorouter"
+            elif mode == "mework":
+                app_name = "MEWORK Autorouter"
             elif mode == "mosu00":
                 app_name = "MOSU Autorouter"
             elif mode == "dar":

@@ -24,6 +24,7 @@ from .smducar_config import (
     status_updates_buffer,
     mspb_metadata_buffer,
     itc_content_fingerprint_buffer,
+    mework_content_fingerprint_buffer,
     error_log_entries,
 )
 
@@ -95,6 +96,13 @@ from .mnsutb_extractor import (
     parse_mnsutb_pdf_bytes,
 )
 
+from .mework_extractor import (
+    MEWORKMetadata,
+    is_mework_row,
+    parse_mework_document_text,
+    parse_mework_pdf_bytes,
+)
+
 from .mosu00_extractor import (
     MOSU00Metadata,
     find_mosu00_source_file,
@@ -129,6 +137,8 @@ class CaseLawRouter:
         self.ohtax0_download_dir.mkdir(parents=True, exist_ok=True)
         self.mnsutb_download_dir = Path.home() / "Downloads" / "Case Law Auto-Routing Resources" / "MNSUTB PDF Downloads"
         self.mnsutb_download_dir.mkdir(parents=True, exist_ok=True)
+        self.mework_download_dir = Path.home() / "Downloads" / "Case Law Auto-Routing Resources" / "MEWORK PDF Downloads"
+        self.mework_download_dir.mkdir(parents=True, exist_ok=True)
         self.mosu00_download_dir = Path.home() / "Downloads" / "Case Law Auto-Routing Resources" / "MOSU00 HTML Downloads"
         self.mosu00_download_dir.mkdir(parents=True, exist_ok=True)
         self._archive_duplicate_mode = False
@@ -400,6 +410,22 @@ class CaseLawRouter:
         if row_index in mspb_metadata_buffer:
             mspb_metadata_buffer[row_index]["Metadata Type"] = "MNSUTB"
 
+    def record_mework_metadata(self, row_index, row, lni, metadata=None, metadata_status="Attempted"):
+        """Capture MEWORK metadata used for the final workbook sheet."""
+        self.record_mspb_metadata(row_index, row, lni, metadata=metadata, metadata_status=metadata_status)
+        if row_index in mspb_metadata_buffer:
+            mspb_metadata_buffer[row_index]["Metadata Type"] = "MEWORK"
+            if metadata and (getattr(metadata, "is_true_duplicate", False) or getattr(metadata, "is_excluded", False)):
+                mspb_metadata_buffer[row_index]["Route"] = "Archive"
+            duplicate_lni = getattr(metadata, "duplicate_of_lni", "") if metadata else ""
+            if duplicate_lni and not getattr(metadata, "is_excluded", False):
+                prepared = mspb_metadata_buffer[row_index].get("Prepared Comments", "") or ""
+                duplicate_comment = f"Dup of {duplicate_lni}"
+                if duplicate_comment not in prepared:
+                    mspb_metadata_buffer[row_index]["Prepared Comments"] = (
+                        f"{prepared}; {duplicate_comment}" if prepared else duplicate_comment
+                    )
+
     def record_mosu00_metadata(self, row_index, row, lni, metadata=None, metadata_status="Attempted"):
         """Capture MOSU00 table metadata used for the final workbook sheet."""
         self.record_mspb_metadata(row_index, row, lni, metadata=metadata, metadata_status=metadata_status)
@@ -451,6 +477,39 @@ class CaseLawRouter:
                 "lni": current_lni,
             }
             return metadata
+
+    def mark_mework_duplicate_status(self, row_index, row, lni, metadata: MEWORKMetadata):
+        """Mark only text-equivalent MEWORK decisions as duplicates within this run."""
+        if not metadata or not getattr(metadata, "content_fingerprint", ""):
+            return metadata
+        if getattr(metadata, "is_excluded", False):
+            logging.info("MEWORK document is excluded; exclusion takes priority over duplicate classification.")
+            return metadata
+
+        current_label = str(row.get("FileName", "")).strip() or str(lni or "").strip()
+        current_lni = str(lni or "").strip()
+        with _itc_duplicate_lock:
+            existing = mework_content_fingerprint_buffer.get(metadata.content_fingerprint)
+            if existing:
+                existing_label = existing.get("label", "") if isinstance(existing, dict) else str(existing)
+                existing_lni = existing.get("lni", "") if isinstance(existing, dict) else ""
+                logging.warning(
+                    "Confirmed MEWORK true duplicate by normalized PDF text fingerprint: %s duplicates %s",
+                    current_label,
+                    existing_label,
+                )
+                return replace(
+                    metadata,
+                    is_true_duplicate=True,
+                    duplicate_of=existing_label,
+                    duplicate_of_lni=existing_lni,
+                )
+
+            mework_content_fingerprint_buffer[metadata.content_fingerprint] = {
+                "label": current_label,
+                "lni": current_lni,
+            }
+        return metadata
 
     def search_lni(self, lni_value):
         max_retries = 3
@@ -663,6 +722,24 @@ class CaseLawRouter:
             return None
         except Exception as e:
             logging.error(f"Error extracting MNSUTB metadata from PDF: {e}")
+            return None
+
+    def extract_mework_metadata_from_search_result(self, row, row_index=None):
+        """Open the result PDF from the File Name column and parse MEWORK metadata."""
+        try:
+            link_element = self.find_mspb_file_name_link(row)
+            if link_element is None:
+                logging.warning("MEWORK File Name link was not found in the search results.")
+                return None
+
+            metadata = self.open_mework_link_and_extract_metadata(link_element, row)
+            if metadata and getattr(metadata, "has_text_content", False):
+                return metadata
+
+            logging.warning("MEWORK PDF did not expose readable text.")
+            return None
+        except Exception as e:
+            logging.error(f"Error extracting MEWORK metadata from PDF: {e}")
             return None
 
     def extract_mosu00_metadata_from_search_result(self, row, row_index=None, file_path=None):
@@ -1085,6 +1162,71 @@ class CaseLawRouter:
             except Exception:
                 pass
 
+    def open_mework_link_and_extract_metadata(self, element, row):
+        """Open the linked PDF in a browser tab and parse MEWORK metadata."""
+        main_tab = self.driver.current_window_handle
+        before_handles = set(self.driver.window_handles)
+        before_downloads = self.snapshot_mework_downloads()
+        opened_tab = None
+        file_name = str(row.get("FileName", "")).strip()
+
+        try:
+            href = self._get_element_href(element)
+            expected_filename = self.get_filename_from_document_href(href) or file_name
+            self.enable_chrome_downloads(self.mework_download_dir)
+            self.enable_browser_network_capture()
+            if href:
+                target_url = urljoin(self.driver.current_url, href)
+                self.driver.execute_script("window.open(arguments[0], '_blank');", target_url)
+            else:
+                target_url = None
+                element.click()
+
+            downloaded_metadata = self.wait_for_mework_downloaded_metadata(
+                before_downloads, expected_filename, timeout=20
+            )
+            if downloaded_metadata:
+                return downloaded_metadata
+
+            try:
+                WebDriverWait(self.driver, 10).until(lambda d: len(d.window_handles) > len(before_handles))
+                new_handles = set(self.driver.window_handles) - before_handles
+                if new_handles:
+                    opened_tab = new_handles.pop()
+                    self.driver.switch_to.window(opened_tab)
+            except TimeoutException:
+                logging.info("MEWORK link did not open a readable tab yet; continuing to watch for download.")
+
+            downloaded_metadata = self.wait_for_mework_downloaded_metadata(
+                before_downloads, expected_filename, timeout=25
+            )
+            if downloaded_metadata:
+                return downloaded_metadata
+
+            logging.info("Opened MEWORK PDF link in a browser tab.")
+            metadata = self.wait_for_mework_metadata_from_open_tab(
+                target_url,
+                before_downloads=before_downloads,
+                expected_filename=expected_filename,
+                timeout=45,
+            )
+            if metadata:
+                return metadata
+
+            logging.warning("MEWORK PDF tab opened, but metadata could not be extracted.")
+            return None
+        except Exception as e:
+            logging.warning(f"Could not read MEWORK document in browser tab: {e}")
+            return None
+        finally:
+            try:
+                if opened_tab and opened_tab in self.driver.window_handles:
+                    self.driver.close()
+                if main_tab in self.driver.window_handles:
+                    self.driver.switch_to.window(main_tab)
+            except Exception:
+                pass
+
     def open_mosu00_link_and_extract_metadata(self, element, row):
         """Open the linked MOSU00 HTML document in a browser tab and parse table metadata."""
         main_tab = self.driver.current_window_handle
@@ -1405,6 +1547,47 @@ class CaseLawRouter:
         self.log_mspb_pdf_tab_diagnostics("MNSUTB")
         return None
 
+    def wait_for_mework_metadata_from_open_tab(self, target_url=None, before_downloads=None, expected_filename=None, timeout=45):
+        deadline = time.time() + timeout
+        self._mspb_pdf_request_ids = set()
+        self._mspb_pdf_checked_request_ids = set()
+        last_status_log = 0
+
+        while time.time() < deadline:
+            self.wait_for_open_tab_load_state(timeout=5)
+
+            downloaded_metadata = self.wait_for_mework_downloaded_metadata(
+                before_downloads or {}, expected_filename, timeout=1
+            )
+            if downloaded_metadata:
+                return downloaded_metadata
+
+            pdf_bytes = self.get_opened_pdf_bytes_from_browser_network(target_url, timeout=1)
+            if pdf_bytes:
+                metadata = parse_mework_pdf_bytes(pdf_bytes, filename_hint=expected_filename)
+                if metadata and metadata.has_text_content:
+                    self.log_mework_metadata(metadata, "browser PDF tab")
+                    return metadata
+
+            for source, browser_text in (
+                ("Chrome accessibility tree", self.read_open_pdf_accessibility_text()),
+                ("browser PDF viewer clipboard", self.copy_open_pdf_tab_text()),
+                ("browser visible text", self.read_open_pdf_tab_text()),
+            ):
+                if self.looks_like_mework_text(browser_text):
+                    metadata = parse_mework_document_text(browser_text, filename_hint=expected_filename)
+                    if metadata and metadata.has_text_content:
+                        self.log_mework_metadata(metadata, source)
+                        return metadata
+
+            if time.time() - last_status_log >= 10:
+                logging.info("Waiting for MEWORK PDF tab to finish loading/expose text...")
+                last_status_log = time.time()
+            time.sleep(2)
+
+        self.log_mspb_pdf_tab_diagnostics("MEWORK")
+        return None
+
     def wait_for_mosu00_metadata_from_open_tab(self, target_url=None, expected_filename=None, timeout=30):
         deadline = time.time() + timeout
         last_status_log = 0
@@ -1582,6 +1765,18 @@ class CaseLawRouter:
                     continue
         return snapshot
 
+    def snapshot_mework_downloads(self):
+        self.mework_download_dir.mkdir(parents=True, exist_ok=True)
+        snapshot = {}
+        for path in self.mework_download_dir.glob("*"):
+            if path.is_file():
+                try:
+                    stat = path.stat()
+                    snapshot[path.name.lower()] = (stat.st_mtime, stat.st_size)
+                except Exception:
+                    continue
+        return snapshot
+
     def snapshot_mosu00_downloads(self):
         self.mosu00_download_dir.mkdir(parents=True, exist_ok=True)
         snapshot = {}
@@ -1690,6 +1885,23 @@ class CaseLawRouter:
                     return None
                 except Exception as e:
                     logging.warning(f"Downloaded MNSUTB PDF could not be parsed: {pdf_path} ({e})")
+            time.sleep(0.5)
+        return None
+
+    def wait_for_mework_downloaded_metadata(self, before_downloads, expected_filename=None, timeout=30):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            pdf_path = self.find_completed_mework_download(before_downloads, expected_filename)
+            if pdf_path:
+                try:
+                    metadata = parse_mework_pdf_bytes(pdf_path.read_bytes(), filename_hint=pdf_path.name)
+                    if metadata and metadata.has_text_content:
+                        self.log_mework_metadata(metadata, f"downloaded PDF {pdf_path.name}")
+                        return metadata
+                    logging.warning("Downloaded MEWORK PDF %s did not expose readable text.", pdf_path.name)
+                    return None
+                except Exception as e:
+                    logging.warning(f"Downloaded MEWORK PDF could not be parsed: {pdf_path} ({e})")
             time.sleep(0.5)
         return None
 
@@ -1822,6 +2034,28 @@ class CaseLawRouter:
         if not candidates:
             return None
 
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return candidates[0]
+
+    def find_completed_mework_download(self, before_downloads, expected_filename=None):
+        expected_lower = expected_filename.lower() if expected_filename else None
+        active_downloads = list(self.mework_download_dir.glob("*.crdownload"))
+        candidates = []
+        for path in self.mework_download_dir.glob("*.pdf"):
+            try:
+                stat = path.stat()
+            except Exception:
+                continue
+            prior = before_downloads.get(path.name.lower())
+            changed = prior is None or prior != (stat.st_mtime, stat.st_size)
+            expected_match = self.path_matches_expected_download(path, expected_lower)
+            if expected_lower and not expected_match:
+                continue
+            if (expected_match and changed) or (not expected_lower and changed):
+                if not any(str(download).lower().startswith(str(path).lower()) for download in active_downloads):
+                    candidates.append(path)
+        if not candidates:
+            return None
         candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return candidates[0]
 
@@ -2069,6 +2303,13 @@ class CaseLawRouter:
             and "IN SUPREME COURT" in text_upper
             and "DATED" in text_upper
         )
+
+    @staticmethod
+    def looks_like_mework_text(text):
+        if not text:
+            return False
+        text_upper = text.upper()
+        return "WORKERS' COMPENSATION BOARD" in text_upper or "WCB#" in text_upper or "WCB NO" in text_upper
 
     def read_open_pdf_accessibility_text(self):
         """Read text exposed through Chrome's accessibility tree, including PDF viewer text."""
@@ -2326,6 +2567,18 @@ class CaseLawRouter:
             "; ".join(metadata.other_numbers or ()),
         )
 
+    def log_mework_metadata(self, metadata, source):
+        logging.info(
+            "Extracted MEWORK metadata from %s: court=%s docket=%s decision_date=%s source_detail=%s other_numbers=%s excluded=%s",
+            source,
+            metadata.court,
+            metadata.docket_number,
+            metadata.decision_date,
+            metadata.source_detail,
+            "; ".join(metadata.other_numbers or ()),
+            getattr(metadata, "is_excluded", False),
+        )
+
     def log_mosu00_metadata(self, metadata, source):
         logging.info(
             "Extracted MOSU00 table metadata from %s: court=%s parent_docket=%s decision_date=%s source_detail=%s child_dockets=%s",
@@ -2356,7 +2609,7 @@ class CaseLawRouter:
         parts = value.split("'")
         return "concat(" + ", \"'\", ".join(f"'{part}'" for part in parts) + ")"
 
-    def open_and_process_form(self, row, full_df, row_index, file_path, retry_count=0, dar_mode=False, wc_mode=False, mspb_mode=False, mspb_metadata=None, itc_metadata=None, irsplr_metadata=None, ohtax0_metadata=None, mnsutb_metadata=None, mosu00_metadata=None):
+    def open_and_process_form(self, row, full_df, row_index, file_path, retry_count=0, dar_mode=False, wc_mode=False, mspb_mode=False, mspb_metadata=None, itc_metadata=None, irsplr_metadata=None, ohtax0_metadata=None, mnsutb_metadata=None, mework_metadata=None, mosu00_metadata=None):
         max_modify_attempts = 3
         # Store current tab state
         main_tab = getattr(self, '_main_tab', self.driver.current_window_handle)
@@ -2383,6 +2636,7 @@ class CaseLawRouter:
                 irsplr_metadata=irsplr_metadata,
                 ohtax0_metadata=ohtax0_metadata,
                 mnsutb_metadata=mnsutb_metadata,
+                mework_metadata=mework_metadata,
                 mosu00_metadata=mosu00_metadata,
             )
             if status == "DONE":
@@ -2428,6 +2682,7 @@ class CaseLawRouter:
                         irsplr_metadata=irsplr_metadata,
                         ohtax0_metadata=ohtax0_metadata,
                         mnsutb_metadata=mnsutb_metadata,
+                        mework_metadata=mework_metadata,
                         mosu00_metadata=mosu00_metadata,
                     )
                 else:
@@ -2482,6 +2737,7 @@ class CaseLawRouter:
         irsplr_metadata=None,
         ohtax0_metadata=None,
         mnsutb_metadata=None,
+        mework_metadata=None,
         mosu00_metadata=None,
     ):
         lni = str(row.get("LNI", "")).strip()
@@ -2511,10 +2767,11 @@ class CaseLawRouter:
             irsplr_metadata=irsplr_metadata,
             ohtax0_metadata=ohtax0_metadata,
             mnsutb_metadata=mnsutb_metadata,
+            mework_metadata=mework_metadata,
             mosu00_metadata=mosu00_metadata,
         )
 
-    def process_batch(self, df, full_df, file_path, update_progress, batch_type, dar_mode=False, wc_mode=False, mspb_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mosu00_mode=False):
+    def process_batch(self, df, full_df, file_path, update_progress, batch_type, dar_mode=False, wc_mode=False, mspb_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
         self.safe_alert_accept()
 
         processed_rows = 0
@@ -2524,7 +2781,7 @@ class CaseLawRouter:
         total_duration = 0
 
         # Emit 0/total progress at the start so UI shows batch start immediately
-        if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mosu00"]:
+        if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mework", "mosu00"]:
             update_progress(batch_type, 0, total_rows)
 
         stop_batch = False
@@ -2551,11 +2808,13 @@ class CaseLawRouter:
                 irsplr_metadata = None
                 ohtax0_metadata = None
                 mnsutb_metadata = None
+                mework_metadata = None
                 mosu00_metadata = None
                 row_is_itc = is_itc_row(row)
                 row_is_irsplr = is_irsplr_row(row)
                 row_is_ohtax0 = is_ohtax0_row(row)
                 row_is_mnsutb = is_mnsutb_row(row)
+                row_is_mework = is_mework_row(row)
                 row_is_mosu00_table = is_mosu00_table_row(row)
                 if mspb_mode:
                     self.record_mspb_metadata(full_index, row, lni, metadata_status="Attempted")
@@ -2591,6 +2850,7 @@ class CaseLawRouter:
 
                     itc_metadata = self.mark_itc_duplicate_status(full_index, row, lni, itc_metadata)
                     self.record_itc_metadata(full_index, row, lni, metadata=itc_metadata, metadata_status="Extracted")
+                    self._archive_duplicate_mode = bool(getattr(itc_metadata, "is_true_duplicate", False))
                     self.click_matching_result()
                 elif irsplr_mode or row_is_irsplr:
                     self.record_irsplr_metadata(full_index, row, lni, metadata_status="Attempted")
@@ -2655,6 +2915,25 @@ class CaseLawRouter:
 
                     self.record_mnsutb_metadata(full_index, row, lni, metadata=mnsutb_metadata, metadata_status="Extracted")
                     self.click_matching_result()
+                elif mework_mode or row_is_mework:
+                    self.record_mework_metadata(full_index, row, lni, metadata_status="Attempted")
+
+                    if not self.search_lni(lni) or not self.check_result_available():
+                        self.record_mework_metadata(full_index, row, lni, metadata_status="Search Failed")
+                        status_updates_buffer[full_index] = "ERROR: LNI NOT FOUND"
+                        continue
+
+                    mework_metadata = self.extract_mework_metadata_from_search_result(row, full_index)
+                    if not mework_metadata:
+                        self.record_mework_metadata(full_index, row, lni, metadata_status="Not Extracted")
+                        status_updates_buffer[full_index] = "SKIPPED: MEWORK PDF DATA NOT FOUND"
+                        logging.warning(f"Skipping MEWORK row {full_index + 2}: required PDF metadata could not be extracted.")
+                        continue
+
+                    mework_metadata = self.mark_mework_duplicate_status(full_index, row, lni, mework_metadata)
+                    self.record_mework_metadata(full_index, row, lni, metadata=mework_metadata, metadata_status="Extracted")
+                    self._archive_duplicate_mode = bool(getattr(mework_metadata, "is_true_duplicate", False))
+                    self.click_matching_result()
                 elif mosu00_mode and row_is_mosu00_table:
                     self.record_mosu00_metadata(full_index, row, lni, metadata_status="Attempted")
 
@@ -2690,6 +2969,7 @@ class CaseLawRouter:
                     irsplr_metadata=irsplr_metadata,
                     ohtax0_metadata=ohtax0_metadata,
                     mnsutb_metadata=mnsutb_metadata,
+                    mework_metadata=mework_metadata,
                     mosu00_metadata=mosu00_metadata,
                 )
 
@@ -2709,6 +2989,7 @@ class CaseLawRouter:
                         irsplr_metadata=irsplr_metadata,
                         ohtax0_metadata=ohtax0_metadata,
                         mnsutb_metadata=mnsutb_metadata,
+                        mework_metadata=mework_metadata,
                         mosu00_metadata=mosu00_metadata,
                     )
 
@@ -2773,6 +3054,10 @@ class CaseLawRouter:
                     existing_status = mspb_metadata_buffer.get(full_index, {}).get("Metadata Status", "")
                     metadata_status = "Extracted" if existing_status == "Extracted" else "Error"
                     self.record_mnsutb_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
+                elif is_mework_row(row):
+                    existing_status = mspb_metadata_buffer.get(full_index, {}).get("Metadata Status", "")
+                    metadata_status = "Extracted" if existing_status == "Extracted" else "Error"
+                    self.record_mework_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
                 elif is_mosu00_table_row(row):
                     existing_status = mspb_metadata_buffer.get(full_index, {}).get("Metadata Status", "")
                     metadata_status = "Extracted" if existing_status == "Extracted" else "Error"
@@ -2791,14 +3076,15 @@ class CaseLawRouter:
                 except:
                     pass
             finally:
+                self._archive_duplicate_mode = False
                 # ✅ Always update progress, regardless of success or error
                 processed_rows += 1
-                if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mosu00"]:
+                if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mework", "mosu00"]:
                     update_progress(batch_type, processed_rows, total_rows)
 
         # ✅ ⏱ Final summary log: outside the loop
             if stop_batch:
-                if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mosu00"]:
+                if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mework", "mosu00"]:
                     update_progress(batch_type, total_rows, total_rows)
                 break
 
@@ -3174,7 +3460,7 @@ class CaseLawRouter:
             logging.info("Ready to Process checkbox is not clickable; treating the document as already processed.")
             return "READY_NOT_CLICKABLE"
 
-    def fill_irt_form(self, row, full_df, row_index, file_path, skip_ready_check=False, dar_mode=False, wc_mode=False, mspb_mode=False, mspb_metadata=None, itc_metadata=None, irsplr_metadata=None, ohtax0_metadata=None, mnsutb_metadata=None, mosu00_metadata=None):
+    def fill_irt_form(self, row, full_df, row_index, file_path, skip_ready_check=False, dar_mode=False, wc_mode=False, mspb_mode=False, mspb_metadata=None, itc_metadata=None, irsplr_metadata=None, ohtax0_metadata=None, mnsutb_metadata=None, mework_metadata=None, mosu00_metadata=None):
         try:
             file_name = str(row["FileName"]).strip()
             is_counsel_file = is_counsel(file_name, dar_mode, wc_mode)
@@ -3190,6 +3476,8 @@ class CaseLawRouter:
                 return self.fill_ohtax0_irt_form(row, row_index, ohtax0_metadata)
             if mnsutb_metadata:
                 return self.fill_mnsutb_irt_form(row, row_index, mnsutb_metadata)
+            if mework_metadata:
+                return self.fill_itc_irt_form(row, row_index, mework_metadata, context_label="MEWORK")
             if mosu00_metadata:
                 return self.fill_mosu00_table_irt_form(row, row_index, mosu00_metadata)
             
@@ -3492,16 +3780,16 @@ class CaseLawRouter:
             logging.debug("Could not inspect route-locked already-processed state for %s: %s", context_label, e)
         return False
 
-    def fill_itc_irt_form(self, row, row_index, itc_metadata: ITCMetadata):
-        """Fill an IRT form for ITC/ITCALJ using metadata extracted from the linked PDF."""
+    def fill_itc_irt_form(self, row, row_index, itc_metadata: ITCMetadata, context_label="ITC"):
+        """Fill an IRT form for a single-document mode with ITC-style routing rules."""
         previous_archive_duplicate_mode = self._archive_duplicate_mode
         self._archive_duplicate_mode = bool(getattr(itc_metadata, "is_true_duplicate", False))
         try:
             if not itc_metadata:
-                logging.warning("Skipping ITC row because extracted metadata is missing.")
+                logging.warning("Skipping %s row because extracted metadata is missing.", context_label)
                 if row_index is not None:
-                    status_updates_buffer[row_index] = "SKIPPED: ITC PDF DATA NOT FOUND"
-                return "SKIPPED: ITC PDF DATA NOT FOUND"
+                    status_updates_buffer[row_index] = f"SKIPPED: {context_label} PDF DATA NOT FOUND"
+                return f"SKIPPED: {context_label} PDF DATA NOT FOUND"
 
             file_name = str(row.get("FileName", "")).strip()
             self.prepare_common_fields(
@@ -3514,16 +3802,16 @@ class CaseLawRouter:
             )
             self.handle_any_alert()
 
-            if getattr(itc_metadata, "is_excluded", False) and self.is_locked_archive_excluded_form("ITC"):
+            if getattr(itc_metadata, "is_excluded", False) and self.is_locked_archive_excluded_form(context_label):
                 status_updates_buffer[row_index] = "ALREADY PROCESSED"
                 self.driver.close()
                 self.driver.switch_to.window(self.driver.window_handles[0])
                 return "ALREADY PROCESSED"
 
-            if not self.handle_itc_fields(row, itc_metadata):
+            if not self.handle_itc_fields(row, itc_metadata, context_label=context_label):
                 if row_index is not None:
-                    status_updates_buffer[row_index] = "SKIPPED: ITC FORM FILL ERROR"
-                return "SKIPPED: ITC FORM FILL ERROR"
+                    status_updates_buffer[row_index] = f"SKIPPED: {context_label} FORM FILL ERROR"
+                return f"SKIPPED: {context_label} FORM FILL ERROR"
 
             try:
                 comments_field = self.wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="comments"]')))
@@ -3538,20 +3826,20 @@ class CaseLawRouter:
                             selected_route or "(blank)",
                         )
                     else:
-                        logging.info("Route dropdown is disabled - ITC document already processed.")
+                        logging.info("Route dropdown is disabled - %s document already processed.", context_label)
                         status_updates_buffer[row_index] = "ALREADY PROCESSED"
                         self.driver.close()
                         self.driver.switch_to.window(self.driver.window_handles[0])
                         return "ALREADY PROCESSED"
 
                 if not comments_field.is_enabled() and not route_field.is_enabled():
-                    logging.error("ITC IRT form is non-interactable.")
+                    logging.error("%s IRT form is non-interactable.", context_label)
                     status_updates_buffer[row_index] = "NON-INTERACTABLE IRT FORM"
                     self.driver.close()
                     self.driver.switch_to.window(self.driver.window_handles[0])
                     return "NON-INTERACTABLE IRT FORM"
             except Exception:
-                logging.error("Could not verify ITC form interactability.")
+                logging.error("Could not verify %s form interactability.", context_label)
                 status_updates_buffer[row_index] = "NON-INTERACTABLE IRT FORM"
                 self.driver.close()
                 self.driver.switch_to.window(self.driver.window_handles[0])
@@ -3570,28 +3858,29 @@ class CaseLawRouter:
                     dropdown = Select(route_element)
                     dropdown.select_by_visible_text(route_label)
                     self.handle_any_alert()
-                    logging.info(f"Selected ITC route: {route_label}")
+                    logging.info("Selected %s route: %s", context_label, route_label)
                     self.driver.execute_script("document.getElementById('route').dispatchEvent(new Event('change'))")
                     self.handle_any_alert()
                 elif route_label == "Archive" and getattr(itc_metadata, "is_excluded", False):
                     selected_route = self.get_selected_dropdown_text(route_element)
                     if self.dropdown_text_matches(selected_route, "Archive"):
-                        logging.info("Confirmed disabled ITC route dropdown is Archive for Excluded source detail.")
+                        logging.info("Confirmed disabled %s route dropdown is Archive for Excluded source detail.", context_label)
                     else:
                         logging.warning(
-                            "Disabled ITC route dropdown is not Archive after Source Detail Excluded; selected route is: %s",
+                            "Disabled %s route dropdown is not Archive after Source Detail Excluded; selected route is: %s",
+                            context_label,
                             selected_route or "(blank)",
                         )
                         if not self.set_dropdown_by_visible_text(route_element, "Archive"):
-                            raise Exception("Disabled ITC route dropdown could not be set to Archive")
+                            raise Exception(f"Disabled {context_label} route dropdown could not be set to Archive")
                         selected_route = self.get_selected_dropdown_text(route_element)
                         if not self.dropdown_text_matches(selected_route, "Archive"):
                             raise Exception(f"Disabled ITC route dropdown did not confirm Archive; selected route is {selected_route!r}")
-                        logging.info("Set and confirmed disabled ITC route dropdown is Archive for Excluded source detail.")
+                        logging.info("Set and confirmed disabled %s route dropdown is Archive for Excluded source detail.", context_label)
                 else:
-                    raise Exception("ITC route dropdown is disabled before route selection")
+                    raise Exception(f"{context_label} route dropdown is disabled before route selection")
             except Exception as e:
-                logging.error(f"Failed to select ITC route before Ready to Process: {e}")
+                logging.error(f"Failed to select {context_label} route before Ready to Process: {e}")
                 status_updates_buffer[row_index] = "ROUTE ERROR"
                 self.driver.close()
                 self.driver.switch_to.window(self.driver.window_handles[0])
@@ -3608,7 +3897,7 @@ class CaseLawRouter:
                 self.driver.switch_to.window(self.driver.window_handles[0])
                 return "ALERT_HANDLED"
             if overlay_appeared == "READY_NOT_CLICKABLE":
-                logging.info("Ready to Process checkbox was not clickable for ITC; marking document as ALREADY PROCESSED.")
+                logging.info("Ready to Process checkbox was not clickable for %s; marking document as ALREADY PROCESSED.", context_label)
                 status_updates_buffer[row_index] = "ALREADY PROCESSED"
                 self.driver.close()
                 self.driver.switch_to.window(self.driver.window_handles[0])
@@ -3616,7 +3905,7 @@ class CaseLawRouter:
 
             return self.handle_routing_and_save(False, row_index, skip_route_and_ready=True)
         except Exception as e:
-            logging.error(f"Error in fill_itc_irt_form(): {e}")
+            logging.error("Error filling %s IRT form: %s", context_label, e)
             if row_index is not None:
                 status_updates_buffer[row_index] = "ERROR"
             return "ERROR"
@@ -4432,23 +4721,23 @@ class CaseLawRouter:
         logging.info("No MOSU00 table save confirmation popup was visible.")
         return False
 
-    def handle_itc_fields(self, row, itc_metadata: ITCMetadata):
+    def handle_itc_fields(self, row, itc_metadata: ITCMetadata, context_label="ITC"):
         try:
             case_name_xpath = '//*[@id="caseName"]'
             try:
                 field = self.wait.until(EC.presence_of_element_located((By.XPATH, case_name_xpath)))
                 existing_case_name = self.wait_for_existing_field_text(case_name_xpath, timeout=6)
                 if existing_case_name:
-                    logging.info(f"ITC Case Name already present; leaving unchanged: {existing_case_name[:120]}")
+                    logging.info(f"{context_label} Case Name already present; leaving unchanged: {existing_case_name[:120]}")
                 else:
                     if field.is_enabled() and field.get_attribute("readonly") != "true":
                         field.clear()
                         field.send_keys("RE")
-                        logging.info("ITC Case Name was blank; set to RE.")
+                        logging.info("%s Case Name was blank; set to RE.", context_label)
                     else:
-                        logging.info("Skipped ITC Case Name because it is not interactable.")
+                        logging.info("Skipped %s Case Name because it is not interactable.", context_label)
             except Exception:
-                logging.error("Error setting ITC case name")
+                logging.error("Error setting %s case name", context_label)
 
             if not self.select_source_detail(itc_metadata.source_detail):
                 return False
@@ -4470,12 +4759,12 @@ class CaseLawRouter:
                 comment_parts.append(additional_comments)
 
             if comment_parts:
-                if not self.append_comments(comment_parts, "ITC"):
+                if not self.append_comments(comment_parts, context_label):
                     return False
 
             return True
         except Exception as e:
-            logging.error(f"Error handling ITC fields: {e}")
+            logging.error("Error handling %s fields: %s", context_label, e)
             return False
 
     def handle_irsplr_fields(self, row, irsplr_metadata: IRSPLRMetadata):
@@ -4822,7 +5111,7 @@ class CaseLawRouter:
         except Exception as e:
             logging.error(f"Unhandled error in submit_irt_form()")
 
-    def process_rows(self, full_df, file_path, update_progress, dar_mode=False, wc_mode=False, mspb_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mosu00_mode=False):
+    def process_rows(self, full_df, file_path, update_progress, dar_mode=False, wc_mode=False, mspb_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
         counsel_df, main_df = None, None
         try:
             self.full_df = full_df
@@ -4931,6 +5220,36 @@ class CaseLawRouter:
                     total_mins = int(mnsutb_duration // 60)
                     total_secs = int(mnsutb_duration % 60)
                     logging.info("[MNSUTB PROCESSING SUMMARY] MNSUTB: %d LNIs successfully routed in %dm %ds", mnsutb_count, total_mins, total_secs)
+                return counsel_df, main_df
+
+            if mework_mode:
+                counsel_df = full_df.iloc[0:0].copy()
+                main_df = full_df.copy()
+                logging.info("MEWORK Count: %d", len(main_df))
+                logging.info("=== Starting MEWORK Batch ===")
+                if self.set_status:
+                    self.set_status("MEWORK Batch Started")
+                mework_count, mework_duration = self.process_batch(
+                    main_df,
+                    full_df,
+                    file_path,
+                    update_progress,
+                    "mework",
+                    dar_mode,
+                    wc_mode,
+                    mework_mode=True,
+                )
+                if self.set_status:
+                    self.set_status("MEWORK Batch Processed")
+                if mework_count > 0:
+                    total_mins = int(mework_duration // 60)
+                    total_secs = int(mework_duration % 60)
+                    logging.info(
+                        "[MEWORK PROCESSING SUMMARY] MEWORK: %d LNIs successfully routed in %dm %ds",
+                        mework_count,
+                        total_mins,
+                        total_secs,
+                    )
                 return counsel_df, main_df
 
             if mosu00_mode:

@@ -21,6 +21,7 @@ from .itc_extractor import is_itc_row
 from .irsplr_extractor import is_irsplr_row
 from .ohtax0_extractor import is_ohtax0_row
 from .mnsutb_extractor import is_mnsutb_row
+from .mework_extractor import is_mework_row
 from .mosu00_extractor import is_mosu00_row, is_mosu00_table_filename
 
 
@@ -78,6 +79,8 @@ def mode_scope_df(df: pd.DataFrame | None, mode: str | None) -> pd.DataFrame:
         return df[df.apply(is_ohtax0_row, axis=1)].copy()
     if normalized_mode == "mnsutb":
         return df[df.apply(is_mnsutb_row, axis=1)].copy()
+    if normalized_mode == "mework":
+        return df[df.apply(is_mework_row, axis=1)].copy()
     if normalized_mode == "mosu00":
         return df[df.apply(is_mosu00_row, axis=1)].copy()
     return df.copy()

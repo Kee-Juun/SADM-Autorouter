@@ -27,6 +27,11 @@ def normalize_itc_docket_number(docket):
         return None
 
     docket = re.sub(r"\s+", "", str(docket).strip().upper())
+
+    misc_match = re.fullmatch(r"MISC-(\d{1,5})", docket)
+    if misc_match:
+        return f"MISC-{misc_match.group(1)}"
+
     match = re.fullmatch(r"(\d{3})-(?:TA-)?(\d+)", docket)
     if not match:
         return None
@@ -40,10 +45,16 @@ def normalize_itc_docket_number(docket):
 def extract_itc_docket_number(file_name):
     file_name = str(file_name).replace("\\", "/").split("/")[-1]
     match = re.search(
-        r"^(?:itc000|itcalj)_(\d{3}-\d+)_\d{8}(?:_\d+)?\.pdf$",
+        r"^itc000_(MISC-\d{1,5})_\d{8}(?:_\d+)?\.pdf$",
         file_name,
         re.IGNORECASE,
     )
+    if not match:
+        match = re.search(
+            r"^(?:itc000|itcalj)_(\d{3}-\d+)_\d{8}(?:_\d+)?\.pdf$",
+            file_name,
+            re.IGNORECASE,
+        )
     if not match:
         return None
     return normalize_itc_docket_number(match.group(1))

@@ -152,13 +152,14 @@ def _document_result_label(mode):
         "irsplr": "IRSPLR documents",
         "ohtax0": "OHTAX0 documents",
         "mnsutb": "MNSUTB documents",
+        "mework": "MEWORK documents",
         "mosu00": "MOSU main/table documents",
     }
     return labels.get(normalized, "Main opinions")
 
 
 def _is_document_only_mode(mode):
-    return str(mode or "").strip().lower() in {"mspb", "itc", "irsplr", "ohtax0", "mnsutb"}
+    return str(mode or "").strip().lower() in {"mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mework"}
 
 
 def _mode_display_name(mode):
@@ -169,6 +170,7 @@ def _mode_display_name(mode):
         "irsplr": "IRSPLR Autorouter",
         "ohtax0": "OHTAX0 Autorouter",
         "mnsutb": "MNSUTB Autorouter",
+        "mework": "MEWORK Autorouter",
         "mosu00": "MOSU Autorouter",
         "dar": "DAR Autoruter",
         "smd": "SMD Autorouter",
@@ -597,12 +599,12 @@ SUCCESS_SCOREBOARDS = (
 
 
 SUCCESS_ATTACHMENT_LINES = (
-    "I attached the run summary, current log, and completed mapping sheet copy so nobody has to go digging later.",
-    "The summary, current log, and mapping sheet copy are attached for quick review and future troubleshooting.",
-    "The important files are attached: summary, log, and mapping sheet copy. Receipts, but organized.",
-    "I included the summary, log, and mapping sheet copy so the run can be checked without a folder scavenger hunt.",
-    "The supporting files are attached, because a good run deserves a readable paper trail.",
-    "Summary, current log, and mapping sheet copy are attached. Future debugging gets to start from facts.",
+    "I attached the current run log and completed mapping sheet so the useful receipts are easy to find.",
+    "The current run log and completed mapping sheet are attached for a quick, tidy review.",
+    "Two useful files are attached: the run log and completed mapping sheet. Receipts, but organized.",
+    "I included the current run log and completed mapping sheet so nobody has to go folder-hunting later.",
+    "The run log and completed mapping sheet are attached, because a clean run deserves a clean paper trail.",
+    "Current run log and completed mapping sheet: attached and ready for future-you.",
 )
 
 
@@ -653,12 +655,12 @@ CRITICAL_SNAPSHOTS = (
 
 
 CRITICAL_ATTACHMENT_LINES = (
-    "I attached the critical summary, payload, current log, and mapping sheet copy so review can start from actual clues.",
-    "The summary, payload, log, and mapping sheet copy are attached. No detective work from scratch required.",
-    "The supporting files are attached, including the payload and current log, so the fix has a proper starting point.",
-    "I included the critical report files and mapping sheet copy so the next pass can be targeted instead of chaotic.",
-    "The useful files are bundled: summary, payload, log, and mapping sheet copy.",
-    "Everything needed for first-pass troubleshooting is attached. Very polite for a failure report.",
+    "I attached the current run log and completed mapping sheet so review can start from the actual clues.",
+    "The current run log and completed mapping sheet are attached. No detective work from scratch required.",
+    "The two useful files are attached: the run log for context and the completed mapping sheet for the rerun plan.",
+    "I included the current run log and completed mapping sheet so the next pass can stay targeted.",
+    "The practical debugging pair is attached: current run log and completed mapping sheet.",
+    "The log and completed mapping sheet are attached. Very organized behavior for an interrupted run.",
 )
 
 
@@ -1087,6 +1089,11 @@ def _send_outlook_email(subject, body, attachments, config):
             pass
 
 
+def _outlook_run_attachments(log_copy, excel_copy):
+    """Return the two user-facing run artifacts that Outlook should attach."""
+    return [path for path in (log_copy, excel_copy) if path]
+
+
 def _build_report_folder(title, folder_name="Critical Error Reports"):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%I-%M-%S_%p").lstrip("0")
     base_dir = Path.home() / "Downloads" / "Case Law Auto-Routing Resources" / folder_name
@@ -1182,7 +1189,7 @@ def notify_critical_error(
 
     log_file = _get_current_log_file()
     log_copy = _copy_attachment(log_file, report_dir, "Current Run Log") if log_file else None
-    excel_copy = _copy_attachment(latest_excel, report_dir, "Current Run Mapping Sheet")
+    excel_copy = _copy_attachment(latest_excel, report_dir, "Completed Run Mapping Sheet")
 
     payload = {
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -1206,10 +1213,9 @@ def notify_critical_error(
 
     summary_path = _write_summary(report_dir, payload, log_copy)
     payload_path = _write_json(report_dir / "Critical Error Payload.json", payload)
-    error_entries_path = _write_error_entries_workbook(report_dir)
+    _write_error_entries_workbook(report_dir)
 
-    attachments = [summary_path, payload_path, log_copy, excel_copy, error_entries_path]
-    attachments = [path for path in attachments if path]
+    attachments = _outlook_run_attachments(log_copy, excel_copy)
 
     subject_mode = str(mode or "Autorouter").upper()
     email_theme = _critical_email_theme()
@@ -1304,7 +1310,7 @@ def notify_successful_run(
 
     summary_path = _write_run_summary(report_dir, payload, log_copy)
     payload_path = _write_json(report_dir / "Run Summary Payload.json", payload)
-    attachments = [path for path in [summary_path, payload_path, log_copy, excel_copy] if path]
+    attachments = _outlook_run_attachments(log_copy, excel_copy)
 
     counts = payload["result_counts"]
     subject_mode = str(mode or "Autorouter").upper()

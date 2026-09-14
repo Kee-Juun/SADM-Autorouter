@@ -48,12 +48,21 @@ DEFAULT_EQUIPPED = {
 DEFAULT_STATS = {
     "total_runs": 0,
     "total_fresh_documents": 0,
+    "total_clean_fresh_documents": 0,
     "clean_runs": 0,
+    "current_clean_run_streak": 0,
+    "best_clean_run_streak": 0,
     "best_clean_run_fresh_documents": 0,
     "parallel_runs": 0,
+    "six_router_runs": 0,
     "max_parallel_routers": 1,
     "modes_completed": [],
+    "mode_fresh_documents": {},
     "after_midnight_runs": 0,
+    "recovery_runs": 0,
+    "last_run_had_failures": False,
+    "best_clean_documents_per_hour": 0.0,
+    "best_speed_run_documents": 0,
 }
 
 LEVEL_XP_THRESHOLDS = (
@@ -537,7 +546,7 @@ REWARDS = {
         "price": 0,
         "purchasable": False,
         "achievement_id": "precision_streak_3",
-        "description": "Earned by completing 3 clean routing runs.",
+        "description": "Earned by completing 3 clean routing runs in a row.",
     },
     "achievement_audit_proof_badge": {
         "type": "badge",
@@ -674,7 +683,7 @@ REWARDS = {
         "price": 0,
         "purchasable": False,
         "achievement_id": "six_router_menace",
-        "description": "Earned by running with six parallel routers.",
+        "description": "Earned by completing 10 fresh runs with all six routers active.",
     },
 
     # Games.
@@ -789,8 +798,8 @@ ACHIEVEMENTS = {
     },
     "precision_streak_3": {
         "name": "Precision Streak",
-        "description": "Complete 3 clean routing runs.",
-        "requirement": {"type": "clean_runs", "count": 3},
+        "description": "Complete 3 clean routing runs in a row.",
+        "requirement": {"type": "clean_run_streak", "count": 3},
         "coins": 30,
         "xp": 15,
         "badge_reward": "achievement_precision_streak_badge",
@@ -853,8 +862,8 @@ ACHIEVEMENTS = {
     },
     "six_router_menace": {
         "name": "Six Router Menace",
-        "description": "Run with six parallel routers.",
-        "requirement": {"type": "max_parallel_routers", "count": 6},
+        "description": "Complete 10 fresh runs with all six routers active.",
+        "requirement": {"type": "six_router_runs", "count": 10},
         "coins": 50,
         "xp": 20,
         "badge_reward": "title_six_router_menace",
@@ -932,6 +941,185 @@ ACHIEVEMENTS = {
         "badge_reward": "achievement_midnight_operator_badge",
     },
 }
+
+
+# Long-form progression tracks. Keeping these definitions together makes new
+# modes and milestones easy to add without duplicating reward-catalog boilerplate.
+PROGRESSION_ACHIEVEMENTS = (
+    # Consecutive clean-run streaks.
+    {
+        "id": "unbroken_circuit_10", "badge_reward": "achievement_unbroken_circuit_badge",
+        "name": "Unbroken Circuit", "image": "achievement_unbroken_circuit.png",
+        "description": "Complete 10 clean routing runs in a row.",
+        "requirement": {"type": "clean_run_streak", "count": 10}, "coins": 180, "xp": 50,
+    },
+    {
+        "id": "flawless_dynasty_25", "badge_reward": "achievement_flawless_dynasty_badge",
+        "name": "Flawless Dynasty", "image": "achievement_flawless_dynasty.png",
+        "description": "Complete 25 clean routing runs in a row.",
+        "requirement": {"type": "clean_run_streak", "count": 25}, "coins": 500, "xp": 125,
+    },
+
+    # Mode mastery: 250 fresh documents in one specific autorouter discipline.
+    {
+        "id": "smd_mastery", "badge_reward": "achievement_smd_mastery_badge",
+        "name": "Counsel Constellation", "image": "achievement_smd_mastery.png",
+        "description": "Route 250 fresh documents in SMD mode.",
+        "requirement": {"type": "mode_fresh_documents", "mode": "smd", "count": 250}, "coins": 225, "xp": 60,
+    },
+    {
+        "id": "dar_mastery", "badge_reward": "achievement_dar_mastery_badge",
+        "name": "Dual Docket Vanguard", "image": "achievement_dar_mastery.png",
+        "description": "Route 250 fresh documents in DAR mode.",
+        "requirement": {"type": "mode_fresh_documents", "mode": "dar", "count": 250}, "coins": 225, "xp": 60,
+    },
+    {
+        "id": "mspb_mastery", "badge_reward": "achievement_mspb_mastery_badge",
+        "name": "Merit Systems Sentinel", "image": "achievement_mspb_mastery.png",
+        "description": "Route 250 fresh documents in MSPB mode.",
+        "requirement": {"type": "mode_fresh_documents", "mode": "mspb", "count": 250}, "coins": 225, "xp": 60,
+    },
+    {
+        "id": "itc_mastery", "badge_reward": "achievement_itc_mastery_badge",
+        "name": "Trade Commission Warden", "image": "achievement_itc_mastery.png",
+        "description": "Route 250 fresh documents in ITC mode.",
+        "requirement": {"type": "mode_fresh_documents", "mode": "itc", "count": 250}, "coins": 225, "xp": 60,
+    },
+    {
+        "id": "irsplr_mastery", "badge_reward": "achievement_irsplr_mastery_badge",
+        "name": "Revenue Oracle", "image": "achievement_irsplr_mastery.png",
+        "description": "Route 250 fresh documents in IRSPLR mode.",
+        "requirement": {"type": "mode_fresh_documents", "mode": "irsplr", "count": 250}, "coins": 225, "xp": 60,
+    },
+    {
+        "id": "ohtax0_mastery", "badge_reward": "achievement_ohtax0_mastery_badge",
+        "name": "Tax Tribunal Arbiter", "image": "achievement_ohtax0_mastery.png",
+        "description": "Route 250 fresh documents in OHTAX0 mode.",
+        "requirement": {"type": "mode_fresh_documents", "mode": "ohtax0", "count": 250}, "coins": 225, "xp": 60,
+    },
+    {
+        "id": "mnsutb_mastery", "badge_reward": "achievement_mnsutb_mastery_badge",
+        "name": "Tablemaster Matrix", "image": "achievement_mnsutb_mastery.png",
+        "description": "Route 250 fresh documents in MNSUTB mode.",
+        "requirement": {"type": "mode_fresh_documents", "mode": "mnsutb", "count": 250}, "coins": 225, "xp": 60,
+    },
+    {
+        "id": "mosu00_mastery", "badge_reward": "achievement_mosu00_mastery_badge",
+        "name": "Show-Me Bench Marshal", "image": "achievement_mosu00_mastery.png",
+        "description": "Route 250 fresh documents in MOSU mode.",
+        "requirement": {"type": "mode_fresh_documents", "mode": "mosu00", "count": 250}, "coins": 225, "xp": 60,
+    },
+
+    # Documents completed in entirely clean runs across the user's lifetime.
+    {
+        "id": "pristine_ledger_500", "badge_reward": "achievement_pristine_ledger_badge",
+        "name": "Pristine Ledger", "image": "achievement_pristine_ledger.png",
+        "description": "Route 500 lifetime documents in clean runs.",
+        "requirement": {"type": "total_clean_fresh_documents", "count": 500}, "coins": 200, "xp": 55,
+    },
+    {
+        "id": "crystal_archive_2500", "badge_reward": "achievement_crystal_archive_badge",
+        "name": "Crystal Archive", "image": "achievement_crystal_archive.png",
+        "description": "Route 2,500 lifetime documents in clean runs.",
+        "requirement": {"type": "total_clean_fresh_documents", "count": 2500}, "coins": 600, "xp": 150,
+    },
+    {
+        "id": "untarnished_dominion_5000", "badge_reward": "achievement_untarnished_dominion_badge",
+        "name": "Untarnished Dominion", "image": "achievement_untarnished_dominion.png",
+        "description": "Route 5,000 lifetime documents in clean runs.",
+        "requirement": {"type": "total_clean_fresh_documents", "count": 5000}, "coins": 1100, "xp": 250,
+    },
+
+    # Recovery means the next fresh run completed cleanly after a recorded failed run.
+    {
+        "id": "back_online", "badge_reward": "achievement_back_online_badge",
+        "name": "Back Online", "image": "achievement_back_online.png",
+        "description": "Complete a clean fresh run after a failed run.",
+        "requirement": {"type": "recovery_runs", "count": 1}, "coins": 75, "xp": 25,
+    },
+    {
+        "id": "phoenix_protocol_5", "badge_reward": "achievement_phoenix_protocol_badge",
+        "name": "Phoenix Protocol", "image": "achievement_phoenix_protocol.png",
+        "description": "Recover cleanly from 5 recorded failed runs.",
+        "requirement": {"type": "recovery_runs", "count": 5}, "coins": 300, "xp": 80,
+    },
+    {
+        "id": "resilience_engine_20", "badge_reward": "achievement_resilience_engine_badge",
+        "name": "Resilience Engine", "image": "achievement_resilience_engine.png",
+        "description": "Recover cleanly from 20 recorded failed runs.",
+        "requirement": {"type": "recovery_runs", "count": 20}, "coins": 850, "xp": 200,
+    },
+
+    # Speed milestones require both throughput and a meaningful clean batch size.
+    {
+        "id": "swift_filing", "badge_reward": "achievement_swift_filing_badge",
+        "name": "Swift Filing", "image": "achievement_swift_filing.png",
+        "description": "Route 25+ documents cleanly at 40+ documents per hour.",
+        "requirement": {"type": "clean_documents_per_hour", "count": 40, "min_documents": 25}, "coins": 140, "xp": 40,
+    },
+    {
+        "id": "velocity_protocol", "badge_reward": "achievement_velocity_protocol_badge",
+        "name": "Velocity Protocol", "image": "achievement_velocity_protocol.png",
+        "description": "Route 40+ documents cleanly at 50+ documents per hour.",
+        "requirement": {"type": "clean_documents_per_hour", "count": 50, "min_documents": 40}, "coins": 300, "xp": 80,
+    },
+    {
+        "id": "warp_docket", "badge_reward": "achievement_warp_docket_badge",
+        "name": "Warp Docket", "image": "achievement_warp_docket.png",
+        "description": "Route 60+ documents cleanly at 60+ documents per hour.",
+        "requirement": {"type": "clean_documents_per_hour", "count": 60, "min_documents": 60}, "coins": 650, "xp": 160,
+    },
+
+    # Lifetime horizons continue well beyond the old 2,500-document ceiling.
+    {
+        "id": "archive_colossus_5500", "badge_reward": "achievement_archive_colossus_badge",
+        "name": "Archive Colossus", "image": "achievement_archive_colossus.png",
+        "description": "Reach 5,500 total fresh routed documents.",
+        "requirement": {"type": "total_fresh_documents", "count": 5500}, "coins": 900, "xp": 225,
+    },
+    {
+        "id": "ten_thousand_mandate", "badge_reward": "achievement_ten_thousand_mandate_badge",
+        "name": "Ten-Thousand Mandate", "image": "achievement_ten_thousand_mandate.png",
+        "description": "Reach 10,000 total fresh routed documents.",
+        "requirement": {"type": "total_fresh_documents", "count": 10000}, "coins": 1600, "xp": 400,
+    },
+    {
+        "id": "endless_index_25000", "badge_reward": "achievement_endless_index_badge",
+        "name": "Endless Index", "image": "achievement_endless_index.png",
+        "description": "Reach 25,000 total fresh routed documents.",
+        "requirement": {"type": "total_fresh_documents", "count": 25000}, "coins": 3000, "xp": 750,
+    },
+    {
+        "id": "docket_singularity_50000", "badge_reward": "achievement_docket_singularity_badge",
+        "name": "Docket Singularity", "image": "achievement_docket_singularity.png",
+        "description": "Reach 50,000 total fresh routed documents.",
+        "requirement": {"type": "total_fresh_documents", "count": 50000}, "coins": 5000, "xp": 1250,
+    },
+)
+
+
+for _progression in PROGRESSION_ACHIEVEMENTS:
+    _achievement_id = _progression["id"]
+    _badge_reward = _progression["badge_reward"]
+    if _achievement_id in ACHIEVEMENTS or _badge_reward in REWARDS:
+        raise ValueError(f"Duplicate progression reward definition: {_achievement_id}")
+    ACHIEVEMENTS[_achievement_id] = {
+        "name": _progression["name"],
+        "description": _progression["description"],
+        "requirement": dict(_progression["requirement"]),
+        "coins": _progression["coins"],
+        "xp": _progression["xp"],
+        "badge_reward": _badge_reward,
+    }
+    REWARDS[_badge_reward] = {
+        "type": "badge",
+        "name": _progression["name"],
+        "image": f"shop_icons/{_progression['image']}",
+        "price": 0,
+        "purchasable": False,
+        "achievement_id": _achievement_id,
+        "description": f"Earned by {_progression['description'][0].lower()}{_progression['description'][1:]}",
+    }
 
 
 def _legacy_rewards_candidates():
@@ -1264,12 +1452,34 @@ def normalize_user_rewards(data):
     stats.update(data.get("stats", {}) or {})
     stats["total_fresh_documents"] = max(_as_int(stats.get("total_fresh_documents")), total_docs)
     stats["total_runs"] = max(0, _as_int(stats.get("total_runs")))
+    stats["total_clean_fresh_documents"] = max(0, _as_int(stats.get("total_clean_fresh_documents")))
     stats["clean_runs"] = max(0, _as_int(stats.get("clean_runs")))
+    stats["current_clean_run_streak"] = max(0, _as_int(stats.get("current_clean_run_streak")))
+    stats["best_clean_run_streak"] = max(
+        stats["current_clean_run_streak"],
+        _as_int(stats.get("best_clean_run_streak")),
+    )
     stats["best_clean_run_fresh_documents"] = max(0, _as_int(stats.get("best_clean_run_fresh_documents")))
     stats["parallel_runs"] = max(0, _as_int(stats.get("parallel_runs")))
+    stats["six_router_runs"] = max(0, _as_int(stats.get("six_router_runs")))
     stats["max_parallel_routers"] = max(1, _as_int(stats.get("max_parallel_routers"), 1))
     stats["after_midnight_runs"] = max(0, _as_int(stats.get("after_midnight_runs")))
     stats["modes_completed"] = _unique_list(stats.get("modes_completed", []))
+    mode_totals = stats.get("mode_fresh_documents", {})
+    if not isinstance(mode_totals, dict):
+        mode_totals = {}
+    stats["mode_fresh_documents"] = {
+        str(mode).lower(): max(0, _as_int(count))
+        for mode, count in mode_totals.items()
+        if mode
+    }
+    stats["recovery_runs"] = max(0, _as_int(stats.get("recovery_runs")))
+    stats["last_run_had_failures"] = bool(stats.get("last_run_had_failures", False))
+    stats["best_clean_documents_per_hour"] = max(
+        0.0,
+        _as_float(stats.get("best_clean_documents_per_hour")),
+    )
+    stats["best_speed_run_documents"] = max(0, _as_int(stats.get("best_speed_run_documents")))
     data["stats"] = stats
     data["visual_settings"] = get_visual_settings(data)
 
@@ -1457,16 +1667,30 @@ def format_achievement_requirement(achievement):
         return f"Reach {count:,} total fresh routed document{'s' if count != 1 else ''}."
     if requirement_type == "clean_runs":
         return f"Complete {count:,} clean routing run{'s' if count != 1 else ''}."
+    if requirement_type == "clean_run_streak":
+        return f"Complete {count:,} clean routing run{'s' if count != 1 else ''} in a row."
+    if requirement_type == "total_clean_fresh_documents":
+        return f"Route {count:,} lifetime document{'s' if count != 1 else ''} in clean runs."
     if requirement_type == "parallel_runs":
         return f"Complete {count:,} fresh parallel-router run{'s' if count != 1 else ''}."
+    if requirement_type == "six_router_runs":
+        return f"Complete {count:,} fresh run{'s' if count != 1 else ''} with all six routers."
     if requirement_type == "max_parallel_routers":
         return f"Run with {count:,} parallel router{'s' if count != 1 else ''}."
     if requirement_type == "single_clean_run_fresh_documents":
         return f"Route at least {count:,} fresh documents in one clean run."
     if requirement_type == "modes_completed":
         return f"Complete fresh runs in {count:,} different autorouter mode{'s' if count != 1 else ''}."
+    if requirement_type == "mode_fresh_documents":
+        mode = str(requirement.get("mode") or "").upper()
+        return f"Route {count:,} fresh document{'s' if count != 1 else ''} in {mode} mode."
     if requirement_type == "after_midnight_runs":
         return f"Complete {count:,} fresh routing run{'s' if count != 1 else ''} after midnight."
+    if requirement_type == "recovery_runs":
+        return f"Complete {count:,} clean recovery run{'s' if count != 1 else ''} after a recorded failure."
+    if requirement_type == "clean_documents_per_hour":
+        minimum = max(1, _as_int(requirement.get("min_documents"), 1))
+        return f"Route at least {minimum:,} documents cleanly at {count:,}+ documents per hour."
     return str((achievement or {}).get("description") or "Complete the required routing milestone.")
 
 
@@ -1481,8 +1705,14 @@ def _requirement_is_met(requirement, stats, current_run):
         return _as_int(stats.get("total_fresh_documents")) >= count
     if requirement_type == "clean_runs":
         return _as_int(stats.get("clean_runs")) >= count
+    if requirement_type == "clean_run_streak":
+        return _as_int(stats.get("best_clean_run_streak")) >= count
+    if requirement_type == "total_clean_fresh_documents":
+        return _as_int(stats.get("total_clean_fresh_documents")) >= count
     if requirement_type == "parallel_runs":
         return _as_int(stats.get("parallel_runs")) >= count
+    if requirement_type == "six_router_runs":
+        return _as_int(stats.get("six_router_runs")) >= count
     if requirement_type == "max_parallel_routers":
         return _as_int(stats.get("max_parallel_routers"), 1) >= count
     if requirement_type == "single_clean_run_fresh_documents":
@@ -1493,8 +1723,17 @@ def _requirement_is_met(requirement, stats, current_run):
         return best_clean_run >= count
     if requirement_type == "modes_completed":
         return len(_unique_list(stats.get("modes_completed", []))) >= count
+    if requirement_type == "mode_fresh_documents":
+        mode = str(requirement.get("mode") or "").lower()
+        return _as_int((stats.get("mode_fresh_documents", {}) or {}).get(mode)) >= count
     if requirement_type == "after_midnight_runs":
         return _as_int(stats.get("after_midnight_runs")) >= count
+    if requirement_type == "recovery_runs":
+        return _as_int(stats.get("recovery_runs")) >= count
+    if requirement_type == "clean_documents_per_hour":
+        minimum = max(1, _as_int(requirement.get("min_documents"), 1))
+        rate = _as_float((current_run or {}).get("documents_per_hour"))
+        return is_clean and fresh_documents >= minimum and rate >= count
     return False
 
 
@@ -1535,7 +1774,7 @@ def _achievement_is_met(achievement_id, stats, current_run):
     if achievement_id == "final_reviewer":
         return _as_int(stats.get("total_fresh_documents")) >= 500
     if achievement_id == "six_router_menace":
-        return _as_int(stats.get("max_parallel_routers"), 1) >= 6
+        return _as_int(stats.get("six_router_runs")) >= 10
     return parallel_routers > 999999
 
 
@@ -1571,8 +1810,20 @@ def _unlock_achievements(user_data, current_run):
     return new_achievements
 
 
+def record_failed_run(user_data=None, persist=True):
+    """Remember a blocking/reset failure so a later clean run can earn recovery credit."""
+    data = normalize_user_rewards(user_data or load_user_rewards())
+    data["stats"]["last_run_had_failures"] = True
+    if persist:
+        data = save_user_rewards(data)
+    if isinstance(user_data, dict):
+        user_data.clear()
+        user_data.update(data)
+    return data
+
+
 def award_run_rewards(user_data, fresh_documents, already_processed=0, error_count=0, timeout_count=0,
-                      mode=None, parallel_routers=1, now=None, persist=True):
+                      mode=None, parallel_routers=1, duration_seconds=None, now=None, persist=True):
     """Apply XP, coins, level rewards, and achievements for a completed run."""
     now = now or _datetime.datetime.now()
     data = normalize_user_rewards(user_data)
@@ -1583,6 +1834,7 @@ def award_run_rewards(user_data, fresh_documents, already_processed=0, error_cou
     error_count = max(0, _as_int(error_count))
     timeout_count = max(0, _as_int(timeout_count))
     parallel_routers = max(1, _as_int(parallel_routers, 1))
+    duration_seconds = max(0.0, _as_float(duration_seconds))
     clean = _is_clean_run(error_count, timeout_count)
 
     xp_earned = fresh_documents
@@ -1594,6 +1846,10 @@ def award_run_rewards(user_data, fresh_documents, already_processed=0, error_cou
         medals.append("No New Routing")
 
     if fresh_documents <= 0:
+        if not clean:
+            data["stats"]["last_run_had_failures"] = True
+            if persist:
+                data = save_user_rewards(data)
         summary = {
             "fresh_documents": 0,
             "already_processed": already_processed,
@@ -1610,6 +1866,9 @@ def award_run_rewards(user_data, fresh_documents, already_processed=0, error_cou
             "total_coins": data.get("coins", 0),
         }
         data["last_run_rewards"] = summary
+        if isinstance(user_data, dict):
+            user_data.clear()
+            user_data.update(data)
         return summary
 
     if fresh_documents > 0:
@@ -1638,29 +1897,58 @@ def award_run_rewards(user_data, fresh_documents, already_processed=0, error_cou
         coins_earned += _as_int(bonus.get("coins"))
 
     stats = data["stats"]
+    previous_run_failed = bool(stats.get("last_run_had_failures", False))
     stats["total_runs"] = _as_int(stats.get("total_runs")) + 1
     stats["total_fresh_documents"] = _as_int(stats.get("total_fresh_documents")) + fresh_documents
     if fresh_documents > 0 and clean:
         stats["clean_runs"] = _as_int(stats.get("clean_runs")) + 1
+        stats["total_clean_fresh_documents"] = (
+            _as_int(stats.get("total_clean_fresh_documents")) + fresh_documents
+        )
+        stats["current_clean_run_streak"] = _as_int(stats.get("current_clean_run_streak")) + 1
+        stats["best_clean_run_streak"] = max(
+            _as_int(stats.get("best_clean_run_streak")),
+            stats["current_clean_run_streak"],
+        )
         stats["best_clean_run_fresh_documents"] = max(
             _as_int(stats.get("best_clean_run_fresh_documents")),
             fresh_documents,
         )
+        if previous_run_failed:
+            stats["recovery_runs"] = _as_int(stats.get("recovery_runs")) + 1
+    elif fresh_documents > 0:
+        stats["current_clean_run_streak"] = 0
     if parallel_routers >= 2 and fresh_documents > 0:
         stats["parallel_runs"] = _as_int(stats.get("parallel_runs")) + 1
+    if parallel_routers >= 6 and fresh_documents > 0 and clean:
+        stats["six_router_runs"] = _as_int(stats.get("six_router_runs")) + 1
     stats["max_parallel_routers"] = max(_as_int(stats.get("max_parallel_routers"), 1), parallel_routers)
     if _is_after_midnight(now) and fresh_documents > 0:
         stats["after_midnight_runs"] = _as_int(stats.get("after_midnight_runs")) + 1
     if mode and fresh_documents > 0:
+        normalized_mode = str(mode).lower()
         modes = set(stats.get("modes_completed", []))
-        modes.add(str(mode).lower())
+        modes.add(normalized_mode)
         stats["modes_completed"] = sorted(modes)
+        mode_totals = dict(stats.get("mode_fresh_documents", {}) or {})
+        mode_totals[normalized_mode] = _as_int(mode_totals.get(normalized_mode)) + fresh_documents
+        stats["mode_fresh_documents"] = mode_totals
+
+    documents_per_hour = 0.0
+    if clean and fresh_documents > 0 and duration_seconds > 0:
+        documents_per_hour = fresh_documents * 3600.0 / duration_seconds
+        if documents_per_hour > _as_float(stats.get("best_clean_documents_per_hour")):
+            stats["best_clean_documents_per_hour"] = round(documents_per_hour, 2)
+            stats["best_speed_run_documents"] = fresh_documents
+    stats["last_run_had_failures"] = not clean
 
     current_run = {
         "fresh_documents": fresh_documents,
         "already_processed": already_processed,
         "clean": clean,
         "parallel_routers": parallel_routers,
+        "duration_seconds": duration_seconds,
+        "documents_per_hour": documents_per_hour,
     }
     new_achievements = _unlock_achievements(data, current_run)
     for achievement in new_achievements:
@@ -1704,6 +1992,9 @@ def award_run_rewards(user_data, fresh_documents, already_processed=0, error_cou
 
     if persist:
         save_user_rewards(data)
+    if isinstance(user_data, dict):
+        user_data.clear()
+        user_data.update(data)
     return summary
 
 

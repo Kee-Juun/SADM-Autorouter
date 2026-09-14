@@ -63,6 +63,7 @@ def load_config():
 status_updates_buffer = {}
 mspb_metadata_buffer = {}
 itc_content_fingerprint_buffer = {}
+mework_content_fingerprint_buffer = {}
 error_log_entries = []
 
 
@@ -117,7 +118,7 @@ def create_folders():
     base_folder = os.path.join(downloads_path, "Case Law Auto-Routing Resources")
     logs_folder = os.path.join(base_folder, "Logs")
     os.makedirs(logs_folder, exist_ok=True)
-    for folder_name in ("MSPB PDF Downloads", "ITC PDF Downloads", "IRSPLR PDF Downloads", "OHTAX0 PDF Downloads", "MNSUTB PDF Downloads", "MOSU00 HTML Downloads"):
+    for folder_name in ("MSPB PDF Downloads", "ITC PDF Downloads", "IRSPLR PDF Downloads", "OHTAX0 PDF Downloads", "MNSUTB PDF Downloads", "MEWORK PDF Downloads", "MOSU00 HTML Downloads"):
         os.makedirs(os.path.join(base_folder, folder_name), exist_ok=True)
     logging.info("Created folders at Downloads.")
     return base_folder
