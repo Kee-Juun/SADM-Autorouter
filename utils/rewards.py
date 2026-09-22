@@ -703,7 +703,7 @@ REWARDS = {
         "required_xp": 2500,
         "image": "../rpg/archivebound_icon.png",
         "unlock_message": "Out of Spec unlocked. The first Archivist Trial is now claimable in the Shop.",
-        "description": "A darkly funny pixel-art RPG about cursed records, ancient deadlines, and one heroic clerk.",
+        "description": "A dark-fantasy pixel RPG about restoring forbidden records.",
     },
 }
 

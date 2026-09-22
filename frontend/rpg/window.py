@@ -13,6 +13,7 @@ from PyQt5.QtGui import (
     QFont,
     QFontDatabase,
     QFontMetricsF,
+    QIcon,
     QKeyEvent,
     QLinearGradient,
     QPainter,
@@ -69,6 +70,11 @@ from .state import CLERK_POSITION, SEALS, VAULT_POSITION, ArchiveboundState
 GAME_WIDTH = 960
 GAME_HEIGHT = 640
 ASSET_DIR = Path(resource_path("assets/rpg"))
+GAME_WINDOW_TITLE = "Out of Spec: The Archivist Trials"
+GAME_TITLE = "OUT OF SPEC"
+GAME_CAPTION = "THE ARCHIVIST TRIALS"
+TITLE_CONTINUE_RECT = QRect(315, 330, 330, 110)
+TITLE_NEW_GAME_RECT = QRect(315, 438, 330, 110)
 ORDER_TURN_LIMIT = 24
 
 # Primary investigation screens communicate through five-second visual
@@ -178,7 +184,10 @@ class ArchiveboundWindow(QMainWindow):
     def __init__(self, host_window=None):
         super().__init__()
         self.host_window = host_window
-        self.setWindowTitle("Out of Spec: The Archivist Trials")
+        self.setWindowTitle(GAME_WINDOW_TITLE)
+        icon_path = ASSET_DIR.parent / "icons" / "archivebound.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.setFixedSize(GAME_WIDTH, GAME_HEIGHT)
         self.setCentralWidget(ArchiveboundCanvas(self))
         self.setStyleSheet("background: #080912;")
@@ -207,6 +216,33 @@ class ArchiveboundCanvas(QWidget):
             room_id: QPixmap(str(ASSET_DIR / details["background"]))
             for room_id, details in ROOMS.items()
         }
+        self.title_background = QPixmap(str(ASSET_DIR / "title_bellglass_fire_v3.png"))
+        self.title_bellglass_fire_atlas = QPixmap(
+            str(ASSET_DIR / "title_bellglass_fire_idle_atlas_v1.png")
+        )
+        self.title_bellglass_fire_frames = self._uniform_grid_atlas_frames(
+            self.title_bellglass_fire_atlas, 4, 1
+        )
+        self.title_flourish_atlas = QPixmap(
+            str(ASSET_DIR / "title_bellglass_title_flourish_atlas_v1.png")
+        )
+        self.title_flourish_frames = self._uniform_grid_atlas_frames(
+            self.title_flourish_atlas, 4, 1
+        )
+        self.title_smoke_atlas = QPixmap(
+            str(ASSET_DIR / "title_bellglass_smoke_idle_atlas_v1.png")
+        )
+        self.title_smoke_frames = self._uniform_grid_atlas_frames(
+            self.title_smoke_atlas, 4, 1
+        )
+        self.title_sparks_atlas = QPixmap(
+            str(ASSET_DIR / "title_bellglass_sparks_idle_atlas_v1.png")
+        )
+        self.title_sparks_frames = self._uniform_grid_atlas_frames(
+            self.title_sparks_atlas, 4, 1
+        )
+        self.title_continue_button = QPixmap(str(ASSET_DIR / "title_button_continue_v1.png"))
+        self.title_new_game_button = QPixmap(str(ASSET_DIR / "title_button_new_game_v1.png"))
         self.environment_sheets = {
             spec["sheet"]: QPixmap(str(ASSET_DIR / spec["sheet"]))
             for specs in ROOM_ENVIRONMENT_SPRITES.values()
@@ -552,6 +588,8 @@ class ArchiveboundCanvas(QWidget):
         self.hovered_passage_marker: str | None = None
         self.hovered_memory_archive: str | None = None
         self.hover_position = QPointF()
+        self.title_hover_button: str | None = None
+        self.title_click_button: str | None = None
         self.toast = ""
         self.toast_ticks = 0
         self.battle_enemy_id = "pending"
@@ -582,6 +620,7 @@ class ArchiveboundCanvas(QWidget):
         self.memory_echo_frame_cache: dict[tuple[str, str, int], QPixmap] = {}
         self._font_family = self._load_font()
         self._title_font_family = self._load_title_font()
+        self._title_caption_font_family = self._load_title_caption_font()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(33)
@@ -824,7 +863,17 @@ class ArchiveboundCanvas(QWidget):
 
     @staticmethod
     def _load_title_font() -> str:
-        path = ASSET_DIR / "Highcrest.ttf"
+        path = Path(resource_path("assets/fonts/DarkReborn-Regular.ttf"))
+        if path.exists():
+            font_id = QFontDatabase.addApplicationFont(str(path))
+            families = QFontDatabase.applicationFontFamilies(font_id)
+            if families:
+                return families[0]
+        return "Consolas"
+
+    @staticmethod
+    def _load_title_caption_font() -> str:
+        path = Path(resource_path("assets/fonts/Firlest-Regular.otf"))
         if path.exists():
             font_id = QFontDatabase.addApplicationFont(str(path))
             families = QFontDatabase.applicationFontFamilies(font_id)
@@ -1528,8 +1577,6 @@ class ArchiveboundCanvas(QWidget):
         if self.scene == "title":
             if key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
                 self.start_game(False)
-            elif key == Qt.Key_N:
-                self.start_game(True)
         elif self.scene == "dialogue":
             if self.dialogue_choices and Qt.Key_1 <= key <= Qt.Key_9:
                 self._choose_dialogue(key - Qt.Key_1)
@@ -1585,10 +1632,10 @@ class ArchiveboundCanvas(QWidget):
             return
         point = event.pos()
         if self.scene == "title":
-            if QRect(350, 420, 260, 48).contains(point):
-                self.start_game(False)
-            elif QRect(350, 480, 260, 42).contains(point):
-                self.start_game(True)
+            if TITLE_CONTINUE_RECT.contains(point):
+                self._press_title_button("continue")
+            elif TITLE_NEW_GAME_RECT.contains(point):
+                self._press_title_button("new_game")
         elif self.scene == "dialogue":
             if self.dialogue_choices:
                 for index, rect in enumerate(self._dialogue_choice_rects()):
@@ -1634,6 +1681,19 @@ class ArchiveboundCanvas(QWidget):
 
     def mouseMoveEvent(self, event):
         self.hover_position = QPointF(event.pos())
+        if self.scene == "title":
+            if TITLE_CONTINUE_RECT.contains(event.pos()):
+                hovered = "continue"
+            elif TITLE_NEW_GAME_RECT.contains(event.pos()):
+                hovered = "new_game"
+            else:
+                hovered = None
+            self.title_hover_button = hovered
+            self.setCursor(Qt.PointingHandCursor if hovered else Qt.ArrowCursor)
+            self.update()
+            return
+        self.title_hover_button = None
+        self.setCursor(Qt.ArrowCursor)
         self.hovered_inventory_item = None
         self.hovered_passage_marker = None
         self.hovered_memory_archive = None
@@ -1655,6 +1715,27 @@ class ArchiveboundCanvas(QWidget):
         if self.dragged_inventory_item:
             self.drag_position = QPointF(event.pos())
         self.update()
+
+    def leaveEvent(self, event):
+        if self.title_hover_button is not None:
+            self.title_hover_button = None
+            self.setCursor(Qt.ArrowCursor)
+            self.update()
+        super().leaveEvent(event)
+
+    def _press_title_button(self, action: str) -> None:
+        """Give a menu control enough time to show its authored press state."""
+        if self.title_click_button is not None:
+            return
+        self.title_click_button = action
+        self.update()
+        QTimer.singleShot(100, lambda choice=action: self._finish_title_button_press(choice))
+
+    def _finish_title_button_press(self, action: str) -> None:
+        if self.title_click_button != action:
+            return
+        self.title_click_button = None
+        self.start_game(action == "new_game")
 
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.LeftButton or not self.dragged_inventory_item:
@@ -4207,13 +4288,14 @@ class ArchiveboundCanvas(QWidget):
             # Do not spend a frame painting the room and HUD underneath a
             # focused puzzle stage; they are intentionally absent here.
             self._paint_seal_puzzle(painter)
+        elif self.scene == "title":
+            self._paint_title_background(painter)
+            self._paint_title(painter)
         else:
             background = self.backgrounds.get(self.state.current_room, self.backgrounds["hub"])
             painter.drawPixmap(self.rect(), background)
             painter.fillRect(self.rect(), QColor(4, 5, 15, 26))
-            if self.scene == "title":
-                self._paint_title(painter)
-            elif self.scene == "cinematic":
+            if self.scene == "cinematic":
                 self._paint_cinematic(painter)
             elif self.scene == "battle":
                 self._paint_battle(painter)
@@ -4318,30 +4400,73 @@ class ArchiveboundCanvas(QWidget):
         painter.restore()
         return selected.pointSizeF()
 
+    def _paint_title_background(self, painter: QPainter):
+        """Layer authored Bellglass-Fire frames over the lore-specific title art."""
+        if self.title_background.isNull():
+            painter.drawPixmap(self.rect(), self.backgrounds["hub"])
+            return
+        painter.drawPixmap(self.rect(), self.title_background)
+        if not self.title_bellglass_fire_frames:
+            return
+        frame = self.title_bellglass_fire_frames[(self.world_clock // 9) % len(self.title_bellglass_fire_frames)]
+        painter.save()
+        painter.setOpacity(0.42)
+        self._draw_pixmap_contained(painter, QRectF(18, 386, 146, 196), frame)
+        painter.translate(GAME_WIDTH, 0)
+        painter.scale(-1, 1)
+        self._draw_pixmap_contained(painter, QRectF(18, 386, 146, 196), frame)
+        painter.restore()
+
+        smoke_frame = self.title_smoke_frames[(self.world_clock // 15) % len(self.title_smoke_frames)] if self.title_smoke_frames else QPixmap()
+        if not smoke_frame.isNull():
+            painter.save()
+            painter.setOpacity(0.30)
+            self._draw_pixmap_cover(painter, QRectF(-26, 452, 1012, 188), smoke_frame, 0.80)
+            painter.restore()
+
+        sparks_frame = self.title_sparks_frames[(self.world_clock // 10) % len(self.title_sparks_frames)] if self.title_sparks_frames else QPixmap()
+        if not sparks_frame.isNull():
+            painter.save()
+            painter.setOpacity(0.36)
+            self._draw_pixmap_contained(painter, QRectF(-24, 126, 210, 330), sparks_frame)
+            painter.translate(GAME_WIDTH, 0)
+            painter.scale(-1, 1)
+            self._draw_pixmap_contained(painter, QRectF(-24, 126, 210, 330), sparks_frame)
+            painter.restore()
+
     def _paint_title(self, painter: QPainter):
-        painter.fillRect(self.rect(), QColor(4, 4, 13, 184))
-        painter.setPen(QColor("#f1d790"))
-        self._draw_fitted_text(painter, QRect(180, 116, 600, 28), "SADM AUTOROUTER PRESENTS", 13, 8, True)
+        title_wash = QLinearGradient(0, 0, 0, GAME_HEIGHT)
+        title_wash.setColorAt(0.0, QColor(2, 4, 13, 68))
+        title_wash.setColorAt(0.42, QColor(3, 5, 15, 124))
+        title_wash.setColorAt(1.0, QColor(2, 3, 10, 92))
+        painter.fillRect(self.rect(), title_wash)
+
+        title_frame = (self.world_clock // 11) % 4
+        title_bob = int(round(math.sin(self.world_clock / 15.0) * 1.5))
+        caption_bob = int(round(math.sin(self.world_clock / 17.0 + 1.1)))
+        flourish = self.title_flourish_frames[title_frame] if self.title_flourish_frames else QPixmap()
+        if not flourish.isNull():
+            painter.save()
+            painter.setOpacity(0.72)
+            self._draw_pixmap_cover(painter, QRectF(204, 194 + title_bob, 552, 48), flourish, 0.57)
+            painter.restore()
+
         painter.setPen(QColor("#f8f3df"))
         self._draw_fitted_text(
-            painter, QRect(100, 164, 760, 58), "Out of Spec", 32, 18, True,
+            painter, QRect(20, 42 + title_bob, 920, 205), GAME_TITLE, 72, 48, False,
             font_family=self._title_font_family,
         )
-        painter.setPen(QColor("#75eced"))
+        painter.setPen(QColor("#8bf5ef"))
         self._draw_fitted_text(
-            painter, QRect(120, 225, 720, 36), "The Archivist Trials", 17, 10, True,
-            font_family=self._title_font_family,
+            painter, QRect(124, 244 + caption_bob, 712, 42), GAME_CAPTION, 30, 16, False,
+            font_family=self._title_caption_font_family,
         )
-        painter.setPen(QColor(220, 222, 235))
-        self._draw_fitted_text(
-            painter,
-            QRect(190, 286, 580, 58),
-            "A dark-fantasy RPG about old records, older curses, and one archivist who should be off the clock.",
-            11,
-            7,
+        self._paint_title_button(
+            painter, TITLE_CONTINUE_RECT, "CONTINUE", "continue", self.title_continue_button
         )
-        self._button(painter, QRect(350, 420, 260, 48), "CONTINUE", "#37d3ca")
-        self._button(painter, QRect(350, 480, 260, 42), "NEW GAME  [N]", "#7869d7", small=True)
+        self._paint_title_button(
+            painter, TITLE_NEW_GAME_RECT, "NEW GAME", "new_game", self.title_new_game_button
+        )
         painter.setPen(QColor(170, 175, 195))
         self._draw_fitted_text(
             painter,
@@ -6961,6 +7086,35 @@ class ArchiveboundCanvas(QWidget):
         self._panel(painter, rect, QColor(6, 9, 19, 230), QColor("#6be7df"))
         painter.setPen(QColor("#edf4f2"))
         self._draw_fitted_text(painter, rect.adjusted(12, 5, -12, -5), text, 9, 6, True)
+
+    def _paint_title_button(
+        self, painter: QPainter, rect: QRect, text: str, button_id: str, plate: QPixmap
+    ) -> None:
+        hovering = self.title_hover_button == button_id
+        pressed = self.title_click_button == button_id
+        target = QRectF(rect).translated(0, 3 if pressed else -2 if hovering else 0)
+        if plate.isNull():
+            self._button(painter, target.toRect(), text, "#2b8077")
+            return
+        if hovering or pressed:
+            glow = QColor("#75f5ed" if button_id == "continue" else "#c987ff")
+            glow.setAlpha(190 if pressed else 122)
+            painter.save()
+            painter.setPen(QPen(glow, 2 if pressed else 1))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(target.adjusted(36, 32, -36, -32), 8, 8)
+            painter.restore()
+        self._draw_pixmap_contained(painter, target, plate)
+        painter.setPen(QColor("#fbf5de"))
+        self._draw_fitted_text(
+            painter,
+            target.adjusted(74, 42, -74, -42),
+            text,
+            13,
+            8,
+            True,
+            Qt.AlignCenter | Qt.TextSingleLine,
+        )
 
     def _button(self, painter, rect: QRect, text: str, color: str, small: bool = False):
         painter.setPen(QPen(QColor("#d7c778"), 1))
