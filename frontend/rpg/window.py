@@ -232,6 +232,12 @@ class ArchiveboundCanvas(QWidget):
         self.title_cinders_calm_frames = self._grid_atlas_cells(
             self.title_cinders_calm_atlas, 2, 8
         )
+        self.title_intermittent_embers_atlas = QPixmap(
+            str(ASSET_DIR / "title_bellglass_intermittent_embers_atlas_v5.png")
+        )
+        self.title_intermittent_embers_frames = self._grid_atlas_cells(
+            self.title_intermittent_embers_atlas, 2, 8
+        )
         self.title_main_ornament_atlas = QPixmap(
             str(ASSET_DIR / "title_main_ornament_loop_atlas_v3.png")
         )
@@ -4471,6 +4477,7 @@ class ArchiveboundCanvas(QWidget):
         *,
         cover: bool = False,
         focus_y: float = 0.5,
+        stretch: bool = False,
     ) -> None:
         """Cross-fade sequential authored frames for smooth title-screen motion."""
         if not frames:
@@ -4484,7 +4491,9 @@ class ArchiveboundCanvas(QWidget):
         base_opacity = painter.opacity()
 
         def draw(frame: QPixmap) -> None:
-            if cover:
+            if stretch:
+                painter.drawPixmap(target, frame, QRectF(frame.rect()))
+            elif cover:
                 self._draw_pixmap_cover(painter, target, frame, focus_y)
             else:
                 self._draw_pixmap_contained(painter, target, frame)
@@ -4517,6 +4526,22 @@ class ArchiveboundCanvas(QWidget):
             self._draw_blended_title_frames(
                 painter, QRectF(0, 438, GAME_WIDTH, 172),
                 self.title_cinders_calm_frames, self.world_clock / 28.0 + 5.0,
+            )
+            painter.restore()
+        # An occasional authored ember drift makes the Bellglass Fire feel
+        # present without imposing constant motion on the player. It fades in
+        # and out over twelve seconds, then rests for another twelve seconds.
+        ember_cycle = self.world_clock % 720
+        if self.title_intermittent_embers_frames and 120 <= ember_cycle < 480:
+            ember_progress = (ember_cycle - 120) / 360.0
+            ember_opacity = 0.21 * math.sin(math.pi * ember_progress)
+            painter.save()
+            painter.setOpacity(max(0.0, ember_opacity))
+            self._draw_blended_title_frames(
+                painter, QRectF(0, 382, GAME_WIDTH, 184),
+                self.title_intermittent_embers_frames,
+                (ember_cycle - 120) / 18.0,
+                stretch=True,
             )
             painter.restore()
 
