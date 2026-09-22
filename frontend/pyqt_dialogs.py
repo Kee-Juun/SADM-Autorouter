@@ -3198,22 +3198,24 @@ class InventoryDialog(QDialog):
     def launch_game(self, reward_id):
         """Launch a game"""
         reward = REWARDS[reward_id]
-        if reward_id == 'game_tetris':
+        if reward_id in {'game_tetris', 'game_archivebound'}:
             # Import TetrisGame lazily to avoid circular import issues
             # (pyqt_tetris imports from pyqt_dialogs)
             try:
-                from .pyqt_tetris import TetrisGame
+                if reward_id == 'game_tetris':
+                    from .pyqt_tetris import TetrisGame
+                    game_window = TetrisGame()
+                else:
+                    from .rpg import ArchiveboundWindow
+                    game_window = ArchiveboundWindow(host_window=self.parent())
             except ImportError as e:
-                logging.error(f"Failed to import TetrisGame: {e}")
-                QMessageBox.warning(self, "Error", "Failed to load Tetris game. Please check the installation.")
+                logging.exception("Failed to import game %s", reward_id)
+                QMessageBox.warning(self, "Error", f"Failed to load {reward['name']}. Please check the installation.")
                 return
-            
-            # Launch Tetris game
-            self.tetris_window = TetrisGame()
-            
+
+            # Retain the window on the dialog so Python does not collect it.
+            self.game_window = game_window
             # Store reference to the game window for focus management after dialog closes
-            game_window = self.tetris_window
-            
             # Use QTimer to ensure proper window stacking order
             def bring_game_to_front():
                 # Minimize the main GUI window to give focus to the game

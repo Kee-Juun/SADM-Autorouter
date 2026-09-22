@@ -696,6 +696,15 @@ REWARDS = {
         "unlock_message": "Tetris break privilege unlocked. It is now claimable in the Shop.",
         "description": "A free break-time game earned at 100 XP. Still somehow stressful. Still somehow worth it.",
     },
+    "game_archivebound": {
+        "type": "game",
+        "name": "Out of Spec: The Archivist Trials",
+        "price": 0,
+        "required_xp": 2500,
+        "image": "../rpg/archivebound_icon.png",
+        "unlock_message": "Out of Spec unlocked. The first Archivist Trial is now claimable in the Shop.",
+        "description": "A darkly funny pixel-art RPG about cursed records, ancient deadlines, and one heroic clerk.",
+    },
 }
 
 

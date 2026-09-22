@@ -2,7 +2,7 @@
     "headless": true,
     "show_console": false,
     "dar_mode": false,
-    "mode": "ohtax0",
+    "mode": "mspb",
     "parallel_routers_enabled": true,
     "parallel_lni_limit": 0,
     "parallel_router_instances": 6,
