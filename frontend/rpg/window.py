@@ -217,26 +217,20 @@ class ArchiveboundCanvas(QWidget):
             for room_id, details in ROOMS.items()
         }
         self.title_background = QPixmap(str(ASSET_DIR / "title_bellglass_fire_v3.png"))
-        # Low-motion title layers use sixteen authored in-between poses and
+        # Low-motion title layers use thirty-two authored in-between poses and
         # cross-fading.  The art registration stays fixed; only energy, smoke,
         # cinders and sparks progress slowly within it.
-        self.title_smoke_calm_atlas = QPixmap(
-            str(ASSET_DIR / "title_bellglass_smoke_calm_atlas_v4.png")
+        self.title_smoke_atlas = QPixmap(
+            str(ASSET_DIR / "title_bellglass_smoke_atlas_v6.png")
         )
-        self.title_smoke_calm_frames = self._grid_atlas_cells(
-            self.title_smoke_calm_atlas, 2, 8
+        self.title_smoke_frames = self._grid_atlas_cells(
+            self.title_smoke_atlas, 2, 16
         )
-        self.title_cinders_calm_atlas = QPixmap(
-            str(ASSET_DIR / "title_bellglass_cinders_calm_atlas_v4.png")
+        self.title_embers_atlas = QPixmap(
+            str(ASSET_DIR / "title_bellglass_embers_atlas_v6.png")
         )
-        self.title_cinders_calm_frames = self._grid_atlas_cells(
-            self.title_cinders_calm_atlas, 2, 8
-        )
-        self.title_intermittent_embers_atlas = QPixmap(
-            str(ASSET_DIR / "title_bellglass_intermittent_embers_atlas_v5.png")
-        )
-        self.title_intermittent_embers_frames = self._grid_atlas_cells(
-            self.title_intermittent_embers_atlas, 2, 8
+        self.title_embers_frames = self._grid_atlas_cells(
+            self.title_embers_atlas, 2, 16
         )
         self.title_main_ornament_atlas = QPixmap(
             str(ASSET_DIR / "title_main_ornament_loop_atlas_v3.png")
@@ -280,11 +274,11 @@ class ArchiveboundCanvas(QWidget):
         self.title_continue_hover_core_frames = self._uniform_grid_atlas_frames(
             self.title_continue_hover_core_atlas, 2, 4
         )
-        self.title_continue_hover_calm_atlas = QPixmap(
-            str(ASSET_DIR / "title_button_continue_hover_calm_atlas_v4.png")
+        self.title_continue_hover_flow_atlas = QPixmap(
+            str(ASSET_DIR / "title_button_continue_hover_flow_atlas_v6.png")
         )
-        self.title_continue_hover_calm_frames = self._grid_atlas_cells(
-            self.title_continue_hover_calm_atlas, 2, 8
+        self.title_continue_hover_flow_frames = self._grid_atlas_cells(
+            self.title_continue_hover_flow_atlas, 2, 16
         )
         self.title_new_game_core_atlas = QPixmap(
             str(ASSET_DIR / "title_button_new_game_core_atlas_v3.png")
@@ -298,11 +292,11 @@ class ArchiveboundCanvas(QWidget):
         self.title_new_game_hover_core_frames = self._uniform_grid_atlas_frames(
             self.title_new_game_hover_core_atlas, 2, 4
         )
-        self.title_new_game_hover_calm_atlas = QPixmap(
-            str(ASSET_DIR / "title_button_new_game_hover_calm_atlas_v4.png")
+        self.title_new_game_hover_flow_atlas = QPixmap(
+            str(ASSET_DIR / "title_button_new_game_hover_flow_atlas_v6.png")
         )
-        self.title_new_game_hover_calm_frames = self._grid_atlas_cells(
-            self.title_new_game_hover_calm_atlas, 2, 8
+        self.title_new_game_hover_flow_frames = self._grid_atlas_cells(
+            self.title_new_game_hover_flow_atlas, 2, 16
         )
         self.environment_sheets = {
             spec["sheet"]: QPixmap(str(ASSET_DIR / spec["sheet"]))
@@ -4512,35 +4506,27 @@ class ArchiveboundCanvas(QWidget):
             painter.drawPixmap(self.rect(), self.backgrounds["hub"])
             return
         painter.drawPixmap(self.rect(), self.title_background)
-        if self.title_smoke_calm_frames:
+        if self.title_smoke_frames:
             painter.save()
-            painter.setOpacity(0.10)
+            painter.setOpacity(0.08)
             self._draw_blended_title_frames(
-                painter, QRectF(0, 468, GAME_WIDTH, 146),
-                self.title_smoke_calm_frames, self.world_clock / 24.0,
+                painter, QRectF(0, 432, GAME_WIDTH, 180),
+                self.title_smoke_frames, self.world_clock / 14.0,
+                stretch=True,
             )
             painter.restore()
-        if self.title_cinders_calm_frames:
-            painter.save()
-            painter.setOpacity(0.15)
-            self._draw_blended_title_frames(
-                painter, QRectF(0, 438, GAME_WIDTH, 172),
-                self.title_cinders_calm_frames, self.world_clock / 28.0 + 5.0,
-            )
-            painter.restore()
-        # An occasional authored ember drift makes the Bellglass Fire feel
-        # present without imposing constant motion on the player. It fades in
-        # and out over twelve seconds, then rests for another twelve seconds.
-        ember_cycle = self.world_clock % 720
-        if self.title_intermittent_embers_frames and 120 <= ember_cycle < 480:
-            ember_progress = (ember_cycle - 120) / 360.0
-            ember_opacity = 0.21 * math.sin(math.pi * ember_progress)
+        # An intermittent 32-frame ember sequence brings the Bellglass Fire
+        # forward periodically, with a long fade instead of a visible restart.
+        ember_cycle = self.world_clock % 900
+        if self.title_embers_frames and 160 <= ember_cycle < 650:
+            ember_progress = (ember_cycle - 160) / 490.0
+            ember_opacity = 0.14 * math.sin(math.pi * ember_progress)
             painter.save()
             painter.setOpacity(max(0.0, ember_opacity))
             self._draw_blended_title_frames(
-                painter, QRectF(0, 382, GAME_WIDTH, 184),
-                self.title_intermittent_embers_frames,
-                (ember_cycle - 120) / 18.0,
+                painter, QRectF(0, 390, GAME_WIDTH, 188),
+                self.title_embers_frames,
+                (ember_cycle - 160) / 15.0,
                 stretch=True,
             )
             painter.restore()
@@ -7239,9 +7225,9 @@ class ArchiveboundCanvas(QWidget):
             else self.title_new_game_core_frames
         )
         hover_core_frames = (
-            self.title_continue_hover_calm_frames
+            self.title_continue_hover_flow_frames
             if button_id == "continue"
-            else self.title_new_game_hover_calm_frames
+            else self.title_new_game_hover_flow_frames
         )
         glow = QColor("#75f5ed" if button_id == "continue" else "#c987ff")
         if pressed:
@@ -7254,9 +7240,9 @@ class ArchiveboundCanvas(QWidget):
                 painter.drawRoundedRect(target.adjusted(inset, 28, -inset, -28), 10, 10)
             painter.restore()
         self._draw_pixmap_contained(painter, target, frames[0])
-        # Keep hover energy only under the label well: no animated frame,
-        # chassis, outer halo or side mechanism moves under the pointer.
-        inner_panel = target.adjusted(78, 39, -78, -39)
+        # Hover energy follows the actual authored route: side cylinders feed
+        # both tubes, then pool and circulate behind the label well.
+        inner_panel = target.adjusted(24, 35, -24, -35)
         if pressed and idle_core_frames:
             # Frames 5-8 are the authored one-shot ignition/release sequence.
             painter.save()
@@ -7268,13 +7254,13 @@ class ArchiveboundCanvas(QWidget):
             )
             painter.restore()
         elif hovering and hover_core_frames:
-            # Sixteen near-identical authored poses make this a restrained,
-            # persistent inner-glass current for the duration of the hover.
+            # Thirty-two near-identical authored poses form one continuous
+            # cylinder-to-tube-to-center flow for the duration of the hover.
             painter.save()
-            painter.setOpacity(0.32)
+            painter.setOpacity(0.27)
             self._draw_blended_title_frames(
                 painter, inner_panel, hover_core_frames,
-                elapsed_hover / 22.0, cover=True, focus_y=0.78,
+                elapsed_hover / 11.5, stretch=True,
             )
             painter.restore()
         painter.setPen(QColor("#fbf5de"))
