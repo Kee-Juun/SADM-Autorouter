@@ -217,32 +217,63 @@ class ArchiveboundCanvas(QWidget):
             for room_id, details in ROOMS.items()
         }
         self.title_background = QPixmap(str(ASSET_DIR / "title_bellglass_fire_v3.png"))
-        self.title_bellglass_fire_atlas = QPixmap(
-            str(ASSET_DIR / "title_bellglass_fire_idle_atlas_v1.png")
+        # The title screen uses dense, authored 4x2 animation atlases.  These
+        # are blended during playback so the atmosphere reads as continuous
+        # layered splash-art motion rather than a handful of hard frame swaps.
+        self.title_atmosphere_atlas = QPixmap(
+            str(ASSET_DIR / "title_bellglass_atmosphere_loop_atlas_v2.png")
         )
-        self.title_bellglass_fire_frames = self._uniform_grid_atlas_frames(
-            self.title_bellglass_fire_atlas, 4, 1
+        self.title_atmosphere_frames = self._grid_atlas_cells(
+            self.title_atmosphere_atlas, 4, 2
         )
-        self.title_flourish_atlas = QPixmap(
-            str(ASSET_DIR / "title_bellglass_title_flourish_atlas_v1.png")
+        self.title_main_ornament_atlas = QPixmap(
+            str(ASSET_DIR / "title_main_ornament_loop_atlas_v3.png")
         )
-        self.title_flourish_frames = self._uniform_grid_atlas_frames(
-            self.title_flourish_atlas, 4, 1
+        self.title_main_ornament_frames = self._uniform_grid_atlas_frames(
+            self.title_main_ornament_atlas, 2, 4
         )
-        self.title_smoke_atlas = QPixmap(
-            str(ASSET_DIR / "title_bellglass_smoke_idle_atlas_v1.png")
+        self.title_caption_ornament_atlas = QPixmap(
+            str(ASSET_DIR / "title_caption_ornament_loop_atlas_v3.png")
         )
-        self.title_smoke_frames = self._uniform_grid_atlas_frames(
-            self.title_smoke_atlas, 4, 1
+        self.title_caption_ornament_frames = self._uniform_grid_atlas_frames(
+            self.title_caption_ornament_atlas, 2, 4
         )
-        self.title_sparks_atlas = QPixmap(
-            str(ASSET_DIR / "title_bellglass_sparks_idle_atlas_v1.png")
+        self.title_continue_button_atlas = QPixmap(
+            str(ASSET_DIR / "title_button_continue_loop_atlas_v3.png")
         )
-        self.title_sparks_frames = self._uniform_grid_atlas_frames(
-            self.title_sparks_atlas, 4, 1
+        self.title_continue_button_frames = self._uniform_grid_atlas_frames(
+            self.title_continue_button_atlas, 2, 4
         )
-        self.title_continue_button = QPixmap(str(ASSET_DIR / "title_button_continue_v1.png"))
-        self.title_new_game_button = QPixmap(str(ASSET_DIR / "title_button_new_game_v1.png"))
+        self.title_new_game_button_atlas = QPixmap(
+            str(ASSET_DIR / "title_button_new_game_loop_atlas_v3.png")
+        )
+        self.title_new_game_button_frames = self._uniform_grid_atlas_frames(
+            self.title_new_game_button_atlas, 2, 4
+        )
+        self.title_continue_core_atlas = QPixmap(
+            str(ASSET_DIR / "title_button_continue_core_atlas_v3.png")
+        )
+        self.title_continue_core_frames = self._uniform_grid_atlas_frames(
+            self.title_continue_core_atlas, 2, 4
+        )
+        self.title_continue_hover_core_atlas = QPixmap(
+            str(ASSET_DIR / "title_button_continue_hover_core_atlas_v3.png")
+        )
+        self.title_continue_hover_core_frames = self._uniform_grid_atlas_frames(
+            self.title_continue_hover_core_atlas, 2, 4
+        )
+        self.title_new_game_core_atlas = QPixmap(
+            str(ASSET_DIR / "title_button_new_game_core_atlas_v3.png")
+        )
+        self.title_new_game_core_frames = self._uniform_grid_atlas_frames(
+            self.title_new_game_core_atlas, 2, 4
+        )
+        self.title_new_game_hover_core_atlas = QPixmap(
+            str(ASSET_DIR / "title_button_new_game_hover_core_atlas_v3.png")
+        )
+        self.title_new_game_hover_core_frames = self._uniform_grid_atlas_frames(
+            self.title_new_game_hover_core_atlas, 2, 4
+        )
         self.environment_sheets = {
             spec["sheet"]: QPixmap(str(ASSET_DIR / spec["sheet"]))
             for specs in ROOM_ENVIRONMENT_SPRITES.values()
@@ -589,7 +620,9 @@ class ArchiveboundCanvas(QWidget):
         self.hovered_memory_archive: str | None = None
         self.hover_position = QPointF()
         self.title_hover_button: str | None = None
+        self.title_hover_started = 0
         self.title_click_button: str | None = None
+        self.title_button_press_started = 0
         self.toast = ""
         self.toast_ticks = 0
         self.battle_enemy_id = "pending"
@@ -1688,6 +1721,8 @@ class ArchiveboundCanvas(QWidget):
                 hovered = "new_game"
             else:
                 hovered = None
+            if hovered != self.title_hover_button:
+                self.title_hover_started = self.world_clock
             self.title_hover_button = hovered
             self.setCursor(Qt.PointingHandCursor if hovered else Qt.ArrowCursor)
             self.update()
@@ -1719,6 +1754,7 @@ class ArchiveboundCanvas(QWidget):
     def leaveEvent(self, event):
         if self.title_hover_button is not None:
             self.title_hover_button = None
+            self.title_hover_started = self.world_clock
             self.setCursor(Qt.ArrowCursor)
             self.update()
         super().leaveEvent(event)
@@ -1728,13 +1764,15 @@ class ArchiveboundCanvas(QWidget):
         if self.title_click_button is not None:
             return
         self.title_click_button = action
+        self.title_button_press_started = self.world_clock
         self.update()
-        QTimer.singleShot(100, lambda choice=action: self._finish_title_button_press(choice))
+        QTimer.singleShot(320, lambda choice=action: self._finish_title_button_press(choice))
 
     def _finish_title_button_press(self, action: str) -> None:
         if self.title_click_button != action:
             return
         self.title_click_button = None
+        self.title_button_press_started = 0
         self.start_game(action == "new_game")
 
     def mouseReleaseEvent(self, event):
@@ -4400,39 +4438,64 @@ class ArchiveboundCanvas(QWidget):
         painter.restore()
         return selected.pointSizeF()
 
+    def _draw_blended_title_frames(
+        self,
+        painter: QPainter,
+        target: QRectF,
+        frames: list[QPixmap],
+        phase: float,
+        *,
+        cover: bool = False,
+        focus_y: float = 0.5,
+    ) -> None:
+        """Cross-fade sequential authored frames for smooth title-screen motion."""
+        if not frames:
+            return
+        position = phase % len(frames)
+        index = int(math.floor(position))
+        following = (index + 1) % len(frames)
+        progress = position - index
+        # A softstep avoids visible changes in velocity at a frame boundary.
+        blend = progress * progress * (3.0 - 2.0 * progress)
+        base_opacity = painter.opacity()
+
+        def draw(frame: QPixmap) -> None:
+            if cover:
+                self._draw_pixmap_cover(painter, target, frame, focus_y)
+            else:
+                self._draw_pixmap_contained(painter, target, frame)
+
+        painter.save()
+        painter.setOpacity(base_opacity * (1.0 - blend))
+        draw(frames[index])
+        if blend > 0.001:
+            painter.setOpacity(base_opacity * blend)
+            draw(frames[following])
+        painter.restore()
+
     def _paint_title_background(self, painter: QPainter):
-        """Layer authored Bellglass-Fire frames over the lore-specific title art."""
+        """Layer a slow authored Bellglass-atmosphere loop over the title art."""
         if self.title_background.isNull():
             painter.drawPixmap(self.rect(), self.backgrounds["hub"])
             return
         painter.drawPixmap(self.rect(), self.title_background)
-        if not self.title_bellglass_fire_frames:
+        if not self.title_atmosphere_frames:
             return
-        frame = self.title_bellglass_fire_frames[(self.world_clock // 9) % len(self.title_bellglass_fire_frames)]
         painter.save()
-        painter.setOpacity(0.42)
-        self._draw_pixmap_contained(painter, QRectF(18, 386, 146, 196), frame)
+        painter.setOpacity(0.23)
+        # Eight deliberately neighboring poses, eased and cross-faded over a
+        # long cycle, create parallax-like atmosphere without synthetic motes.
+        self._draw_blended_title_frames(
+            painter, QRectF(-18, 248, 470, 404), self.title_atmosphere_frames,
+            self.world_clock / 12.0,
+        )
         painter.translate(GAME_WIDTH, 0)
         painter.scale(-1, 1)
-        self._draw_pixmap_contained(painter, QRectF(18, 386, 146, 196), frame)
+        self._draw_blended_title_frames(
+            painter, QRectF(-18, 248, 470, 404), self.title_atmosphere_frames,
+            self.world_clock / 12.0 + 3.5,
+        )
         painter.restore()
-
-        smoke_frame = self.title_smoke_frames[(self.world_clock // 15) % len(self.title_smoke_frames)] if self.title_smoke_frames else QPixmap()
-        if not smoke_frame.isNull():
-            painter.save()
-            painter.setOpacity(0.30)
-            self._draw_pixmap_cover(painter, QRectF(-26, 452, 1012, 188), smoke_frame, 0.80)
-            painter.restore()
-
-        sparks_frame = self.title_sparks_frames[(self.world_clock // 10) % len(self.title_sparks_frames)] if self.title_sparks_frames else QPixmap()
-        if not sparks_frame.isNull():
-            painter.save()
-            painter.setOpacity(0.36)
-            self._draw_pixmap_contained(painter, QRectF(-24, 126, 210, 330), sparks_frame)
-            painter.translate(GAME_WIDTH, 0)
-            painter.scale(-1, 1)
-            self._draw_pixmap_contained(painter, QRectF(-24, 126, 210, 330), sparks_frame)
-            painter.restore()
 
     def _paint_title(self, painter: QPainter):
         title_wash = QLinearGradient(0, 0, 0, GAME_HEIGHT)
@@ -4441,31 +4504,38 @@ class ArchiveboundCanvas(QWidget):
         title_wash.setColorAt(1.0, QColor(2, 3, 10, 92))
         painter.fillRect(self.rect(), title_wash)
 
-        title_frame = (self.world_clock // 11) % 4
-        title_bob = int(round(math.sin(self.world_clock / 15.0) * 1.5))
-        caption_bob = int(round(math.sin(self.world_clock / 17.0 + 1.1)))
-        flourish = self.title_flourish_frames[title_frame] if self.title_flourish_frames else QPixmap()
-        if not flourish.isNull():
+        if self.title_main_ornament_frames:
             painter.save()
-            painter.setOpacity(0.72)
-            self._draw_pixmap_cover(painter, QRectF(204, 194 + title_bob, 552, 48), flourish, 0.57)
+            painter.setOpacity(0.74)
+            self._draw_blended_title_frames(
+                painter, QRectF(74, 20, 812, 222), self.title_main_ornament_frames,
+                self.world_clock / 16.0,
+            )
             painter.restore()
 
         painter.setPen(QColor("#f8f3df"))
         self._draw_fitted_text(
-            painter, QRect(20, 42 + title_bob, 920, 205), GAME_TITLE, 72, 48, False,
+            painter, QRect(20, 42, 920, 205), GAME_TITLE, 72, 48, False,
             font_family=self._title_font_family,
         )
+        if self.title_caption_ornament_frames:
+            painter.save()
+            painter.setOpacity(0.82)
+            self._draw_blended_title_frames(
+                painter, QRectF(178, 266, 604, 58), self.title_caption_ornament_frames,
+                self.world_clock / 14.0 + 2.0,
+            )
+            painter.restore()
         painter.setPen(QColor("#8bf5ef"))
         self._draw_fitted_text(
-            painter, QRect(124, 244 + caption_bob, 712, 42), GAME_CAPTION, 30, 16, False,
+            painter, QRect(124, 244, 712, 42), GAME_CAPTION, 30, 16, False,
             font_family=self._title_caption_font_family,
         )
         self._paint_title_button(
-            painter, TITLE_CONTINUE_RECT, "CONTINUE", "continue", self.title_continue_button
+            painter, TITLE_CONTINUE_RECT, "CONTINUE", "continue", self.title_continue_button_frames
         )
         self._paint_title_button(
-            painter, TITLE_NEW_GAME_RECT, "NEW GAME", "new_game", self.title_new_game_button
+            painter, TITLE_NEW_GAME_RECT, "NEW GAME", "new_game", self.title_new_game_button_frames
         )
         painter.setPen(QColor(170, 175, 195))
         self._draw_fitted_text(
@@ -7088,27 +7158,86 @@ class ArchiveboundCanvas(QWidget):
         self._draw_fitted_text(painter, rect.adjusted(12, 5, -12, -5), text, 9, 6, True)
 
     def _paint_title_button(
-        self, painter: QPainter, rect: QRect, text: str, button_id: str, plate: QPixmap
+        self, painter: QPainter, rect: QRect, text: str, button_id: str, frames: list[QPixmap]
     ) -> None:
         hovering = self.title_hover_button == button_id
         pressed = self.title_click_button == button_id
-        target = QRectF(rect).translated(0, 3 if pressed else -2 if hovering else 0)
-        if plate.isNull():
-            self._button(painter, target.toRect(), text, "#2b8077")
+        target = QRectF(rect)
+        if not frames:
+            self._button(painter, target.toRect(), text, "#2b8077" if button_id == "continue" else "#6448ae")
             return
-        if hovering or pressed:
-            glow = QColor("#75f5ed" if button_id == "continue" else "#c987ff")
-            glow.setAlpha(190 if pressed else 122)
+        elapsed_hover = max(0, self.world_clock - self.title_hover_started)
+        elapsed_press = max(0, self.world_clock - self.title_button_press_started)
+        if pressed:
+            # A full authored compression/energise pass is visible before the
+            # selection commits; the button itself never merely hops in place.
+            phase = min(float(len(frames) - 0.02), elapsed_press * 0.96)
+            activation = min(1.0, elapsed_press / 5.0)
+        elif hovering:
+            # Start with a gentle mechanical wake-up, then continuously loop
+            # the rail, piston, cog and conduit movement while hovered.
+            phase = elapsed_hover / 5.2
+            activation = min(1.0, elapsed_hover / 7.0)
+        else:
+            phase = 0.0
+            activation = 0.0
+        idle_core_frames = (
+            self.title_continue_core_frames
+            if button_id == "continue"
+            else self.title_new_game_core_frames
+        )
+        hover_core_frames = (
+            self.title_continue_hover_core_frames
+            if button_id == "continue"
+            else self.title_new_game_hover_core_frames
+        )
+        glow = QColor("#75f5ed" if button_id == "continue" else "#c987ff")
+        if activation:
             painter.save()
-            painter.setPen(QPen(glow, 2 if pressed else 1))
             painter.setBrush(Qt.NoBrush)
-            painter.drawRoundedRect(target.adjusted(36, 32, -36, -32), 8, 8)
+            for inset, width, alpha in ((17, 4, 22), (26, 2, 56), (37, 1, 116)):
+                ring = QColor(glow)
+                ring.setAlpha(int(alpha * activation + (24 if pressed else 0)))
+                painter.setPen(QPen(ring, width))
+                painter.drawRoundedRect(target.adjusted(inset, 28, -inset, -28), 10, 10)
             painter.restore()
-        self._draw_pixmap_contained(painter, target, plate)
+        self._draw_blended_title_frames(painter, target, frames, phase)
+        inner_panel = target.adjusted(59, 34, -59, -34)
+        if pressed and idle_core_frames:
+            # Frames 5-8 are the authored one-shot ignition/release sequence.
+            painter.save()
+            painter.setOpacity(0.92)
+            painter.setCompositionMode(QPainter.CompositionMode_Screen)
+            self._draw_blended_title_frames(
+                painter, inner_panel, idle_core_frames,
+                4.0 + min(1.60, elapsed_press * 0.40), cover=True, focus_y=0.85,
+            )
+            painter.restore()
+        elif hovering and hover_core_frames:
+            # This loop remains alive for the entire hover, then stops cleanly
+            # when the cursor leaves instead of spilling into click feedback.
+            painter.save()
+            painter.setOpacity(0.82)
+            painter.setCompositionMode(QPainter.CompositionMode_Screen)
+            self._draw_blended_title_frames(
+                painter, inner_panel, hover_core_frames,
+                elapsed_hover / 3.8, cover=True, focus_y=0.85,
+            )
+            painter.restore()
+        elif idle_core_frames:
+            # The first four frames remain a restrained contained-energy idle.
+            painter.save()
+            painter.setOpacity(0.20)
+            painter.setCompositionMode(QPainter.CompositionMode_Screen)
+            self._draw_blended_title_frames(
+                painter, inner_panel, idle_core_frames[:4],
+                self.world_clock / 22.0, cover=True, focus_y=0.85,
+            )
+            painter.restore()
         painter.setPen(QColor("#fbf5de"))
         self._draw_fitted_text(
             painter,
-            target.adjusted(74, 42, -74, -42),
+            target.adjusted(82, 42, -82, -42),
             text,
             13,
             8,
