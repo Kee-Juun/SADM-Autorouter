@@ -4554,9 +4554,20 @@ class ArchiveboundCanvas(QWidget):
             )
             painter.restore()
 
+        title_rect = QRect(20, 42, 920, 205)
+        painter.setPen(QPen(QColor(1, 3, 10, 225), 3.0))
+        self._draw_fitted_text(
+            painter, title_rect.translated(4, 5), GAME_TITLE, 72, 48, False,
+            font_family=self._title_font_family,
+        )
+        painter.setPen(QPen(QColor(4, 7, 16, 210), 2.0))
+        self._draw_fitted_text(
+            painter, title_rect, GAME_TITLE, 72, 48, False,
+            font_family=self._title_font_family,
+        )
         painter.setPen(QColor("#f8f3df"))
         self._draw_fitted_text(
-            painter, QRect(20, 42, 920, 205), GAME_TITLE, 72, 48, False,
+            painter, title_rect, GAME_TITLE, 72, 48, False,
             font_family=self._title_font_family,
         )
         if self.title_caption_ornament_frames:
@@ -4566,9 +4577,20 @@ class ArchiveboundCanvas(QWidget):
                 painter, QRectF(178, 266, 604, 58), self.title_caption_ornament_frames[0]
             )
             painter.restore()
+        caption_rect = QRect(124, 244, 712, 42)
+        painter.setPen(QPen(QColor(1, 4, 12, 230), 2.2))
+        self._draw_fitted_text(
+            painter, caption_rect.translated(2, 3), GAME_CAPTION, 30, 16, False,
+            font_family=self._title_caption_font_family,
+        )
+        painter.setPen(QPen(QColor(3, 8, 17, 190), 1.6))
+        self._draw_fitted_text(
+            painter, caption_rect, GAME_CAPTION, 30, 16, False,
+            font_family=self._title_caption_font_family,
+        )
         painter.setPen(QColor("#8bf5ef"))
         self._draw_fitted_text(
-            painter, QRect(124, 244, 712, 42), GAME_CAPTION, 30, 16, False,
+            painter, caption_rect, GAME_CAPTION, 30, 16, False,
             font_family=self._title_caption_font_family,
         )
         self._paint_title_button(
@@ -7243,6 +7265,10 @@ class ArchiveboundCanvas(QWidget):
         # Hover energy follows the actual authored route: side cylinders feed
         # both tubes, then pool and circulate behind the label well.
         inner_panel = target.adjusted(24, 35, -24, -35)
+        if button_id == "continue":
+            # The Continue sheet's energy band is registered lower than the
+            # New Game band. Align its authored centroid with the label well.
+            inner_panel.translate(0, -7)
         if pressed and idle_core_frames:
             # Frames 5-8 are the authored one-shot ignition/release sequence.
             painter.save()
@@ -7257,7 +7283,7 @@ class ArchiveboundCanvas(QWidget):
             # Thirty-two near-identical authored poses form one continuous
             # cylinder-to-tube-to-center flow for the duration of the hover.
             painter.save()
-            painter.setOpacity(0.27)
+            painter.setOpacity(0.40)
             self._draw_blended_title_frames(
                 painter, inner_panel, hover_core_frames,
                 elapsed_hover / 11.5, stretch=True,
