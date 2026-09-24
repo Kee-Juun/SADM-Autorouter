@@ -217,20 +217,13 @@ class ArchiveboundCanvas(QWidget):
             for room_id, details in ROOMS.items()
         }
         self.title_background = QPixmap(str(ASSET_DIR / "title_bellglass_fire_v3.png"))
-        # Low-motion title layers use thirty-two authored in-between poses and
-        # cross-fading.  The art registration stays fixed; only energy, smoke,
-        # cinders and sparks progress slowly within it.
-        self.title_smoke_atlas = QPixmap(
-            str(ASSET_DIR / "title_bellglass_smoke_atlas_v6.png")
+        # A single, authored atmosphere loop keeps the Bellglass Fire's smoke,
+        # sparks, and embers coherent rather than layering unrelated effects.
+        self.title_atmosphere_atlas = QPixmap(
+            str(ASSET_DIR / "title_bellglass_atmosphere_atlas_v7.png")
         )
-        self.title_smoke_frames = self._grid_atlas_cells(
-            self.title_smoke_atlas, 2, 16
-        )
-        self.title_embers_atlas = QPixmap(
-            str(ASSET_DIR / "title_bellglass_embers_atlas_v6.png")
-        )
-        self.title_embers_frames = self._grid_atlas_cells(
-            self.title_embers_atlas, 2, 16
+        self.title_atmosphere_frames = self._grid_atlas_cells(
+            self.title_atmosphere_atlas, 4, 8
         )
         self.title_main_ornament_atlas = QPixmap(
             str(ASSET_DIR / "title_main_ornament_loop_atlas_v3.png")
@@ -268,17 +261,11 @@ class ArchiveboundCanvas(QWidget):
         self.title_continue_core_frames = self._uniform_grid_atlas_frames(
             self.title_continue_core_atlas, 2, 4
         )
-        self.title_continue_hover_core_atlas = QPixmap(
-            str(ASSET_DIR / "title_button_continue_hover_core_atlas_v3.png")
+        self.title_continue_plasma_atlas = QPixmap(
+            str(ASSET_DIR / "title_button_continue_plasma_atlas_v7.png")
         )
-        self.title_continue_hover_core_frames = self._uniform_grid_atlas_frames(
-            self.title_continue_hover_core_atlas, 2, 4
-        )
-        self.title_continue_hover_flow_atlas = QPixmap(
-            str(ASSET_DIR / "title_button_continue_hover_flow_atlas_v6.png")
-        )
-        self.title_continue_hover_flow_frames = self._grid_atlas_cells(
-            self.title_continue_hover_flow_atlas, 2, 16
+        self.title_continue_plasma_frames = self._grid_atlas_cells(
+            self.title_continue_plasma_atlas, 3, 9
         )
         self.title_new_game_core_atlas = QPixmap(
             str(ASSET_DIR / "title_button_new_game_core_atlas_v3.png")
@@ -286,17 +273,11 @@ class ArchiveboundCanvas(QWidget):
         self.title_new_game_core_frames = self._uniform_grid_atlas_frames(
             self.title_new_game_core_atlas, 2, 4
         )
-        self.title_new_game_hover_core_atlas = QPixmap(
-            str(ASSET_DIR / "title_button_new_game_hover_core_atlas_v3.png")
+        self.title_new_game_plasma_atlas = QPixmap(
+            str(ASSET_DIR / "title_button_new_game_plasma_atlas_v7.png")
         )
-        self.title_new_game_hover_core_frames = self._uniform_grid_atlas_frames(
-            self.title_new_game_hover_core_atlas, 2, 4
-        )
-        self.title_new_game_hover_flow_atlas = QPixmap(
-            str(ASSET_DIR / "title_button_new_game_hover_flow_atlas_v6.png")
-        )
-        self.title_new_game_hover_flow_frames = self._grid_atlas_cells(
-            self.title_new_game_hover_flow_atlas, 2, 16
+        self.title_new_game_plasma_frames = self._grid_atlas_cells(
+            self.title_new_game_plasma_atlas, 4, 9
         )
         self.environment_sheets = {
             spec["sheet"]: QPixmap(str(ASSET_DIR / spec["sheet"]))
@@ -4506,36 +4487,16 @@ class ArchiveboundCanvas(QWidget):
             painter.drawPixmap(self.rect(), self.backgrounds["hub"])
             return
         painter.drawPixmap(self.rect(), self.title_background)
-        if self.title_smoke_frames:
-            # The smoke is the slowest motion in the composition.  It keeps
-            # the depth planes alive without asking the eye to follow it.
-            smoke_phase = self.world_clock / 18.0
-            smoke_opacity = 0.095 + 0.018 * (0.5 + 0.5 * math.sin(self.world_clock / 150.0))
+        if self.title_atmosphere_frames:
+            # The stronger replacement loop was authored as one image plane:
+            # smoke carries the ember field, so their motion reads as a single
+            # Bellglass fire rather than separate, programmable particle bands.
             painter.save()
-            painter.setOpacity(smoke_opacity)
-            self._draw_blended_title_frames(
-                painter, QRectF(0, 432, GAME_WIDTH, 180),
-                self.title_smoke_frames, smoke_phase,
-                stretch=True,
-            )
-            painter.restore()
-        # The embers are a discrete authored passage, not a perpetual particle
-        # loop: they enter from the fire, cross the scene once, and disappear
-        # before the next quiet interval. This keeps the Bellglass Fire present
-        # without the predictable "screensaver" feeling of a constant effect.
-        ember_cycle = self.world_clock % 1200
-        ember_start = 180
-        ember_duration = 420
-        if self.title_embers_frames and ember_start <= ember_cycle < ember_start + ember_duration:
-            ember_progress = (ember_cycle - ember_start) / ember_duration
-            ember_opacity = 0.24 * math.sin(math.pi * ember_progress) ** 1.35
-            painter.save()
-            painter.setOpacity(max(0.0, ember_opacity))
+            painter.setOpacity(0.52 + 0.08 * (0.5 + 0.5 * math.sin(self.world_clock / 160.0)))
             painter.setCompositionMode(QPainter.CompositionMode_Screen)
             self._draw_blended_title_frames(
-                painter, QRectF(0, 390, GAME_WIDTH, 188),
-                self.title_embers_frames,
-                ember_progress * (len(self.title_embers_frames) - 1),
+                painter, QRectF(0, 348, GAME_WIDTH, 292),
+                self.title_atmosphere_frames, self.world_clock / 11.5,
                 stretch=True,
             )
             painter.restore()
@@ -7261,10 +7222,10 @@ class ArchiveboundCanvas(QWidget):
             if button_id == "continue"
             else self.title_new_game_core_frames
         )
-        hover_core_frames = (
-            self.title_continue_hover_flow_frames
+        plasma_frames = (
+            self.title_continue_plasma_frames
             if button_id == "continue"
-            else self.title_new_game_hover_flow_frames
+            else self.title_new_game_plasma_frames
         )
         glow = QColor("#75f5ed" if button_id == "continue" else "#c987ff")
         if pressed:
@@ -7276,12 +7237,28 @@ class ArchiveboundCanvas(QWidget):
                 painter.setPen(QPen(ring, width))
                 painter.drawRoundedRect(target.adjusted(inset, 28, -inset, -28), 10, 10)
             painter.restore()
-        self._draw_pixmap_contained(painter, target, frames[0])
-        # The authored ribbon occupies the physical route from each cylinder,
-        # along the tubes, and into the label well.  The brighter hold below is
-        # clipped to the well, so the hover remains readable rather than loud.
+        if hovering and plasma_frames:
+            # One hover has two intentional chapters. The first sixteen frames
+            # ignite both terminals and send plasma inward once. The latter
+            # sixteen are a slow, looping liquid reservoir after the streams
+            # have converged; restarting at frame one would break the physics.
+            transport_count = min(16, len(plasma_frames) - 1)
+            transport_frames = min(float(transport_count), elapsed_hover / 5.0)
+            if elapsed_hover <= 80:
+                plasma_phase = transport_frames
+            else:
+                sustain_count = max(1, len(plasma_frames) - transport_count)
+                plasma_phase = transport_count + (
+                    (elapsed_hover - 80) / 19.0
+                ) % sustain_count
+            self._draw_blended_title_frames(
+                painter, target, plasma_frames, plasma_phase, stretch=True,
+            )
+        else:
+            self._draw_pixmap_contained(painter, target, frames[0])
+        # Click ignition remains a contained one-shot over the same physical
+        # channel and never moves the button plate.
         flow_channel = target.adjusted(14, 33, -14, -33)
-        label_well = target.adjusted(82, 42, -82, -42)
         if button_id == "continue":
             # The Continue sheet's energy band is registered lower than the
             # New Game band. Align its authored centroid with the label well.
@@ -7298,52 +7275,6 @@ class ArchiveboundCanvas(QWidget):
                 painter, flow_channel, idle_core_frames,
                 4.0 + min(1.60, elapsed_press * 0.40), cover=True, focus_y=0.85,
             )
-            painter.restore()
-        elif hovering and hover_core_frames:
-            # A soft arrival is critical: immediately presenting a bright loop
-            # makes a UI feel jumpy. After the short reveal, thirty-two authored
-            # poses calmly carry energy cylinder -> tube -> label well.
-            hover_arrival = min(1.0, elapsed_hover / 18.0)
-            hover_arrival = hover_arrival * hover_arrival * (3.0 - 2.0 * hover_arrival)
-            painter.save()
-            painter.setOpacity(0.28 + 0.36 * hover_arrival)
-            painter.setCompositionMode(QPainter.CompositionMode_Screen)
-            self._draw_blended_title_frames(
-                painter, flow_channel, hover_core_frames,
-                elapsed_hover / 13.5, stretch=True,
-            )
-            painter.restore()
-            # A second, low-energy additive pass preserves the authored plasma
-            # shapes but raises contrast enough for the tube travel to survive
-            # against the dark Bellglass background.
-            painter.save()
-            painter.setOpacity(0.12 + 0.16 * hover_arrival)
-            painter.setCompositionMode(QPainter.CompositionMode_Plus)
-            self._draw_blended_title_frames(
-                painter, flow_channel, hover_core_frames,
-                elapsed_hover / 13.5, stretch=True,
-            )
-            painter.restore()
-            # The reservoir is the destination of both authored tube flows:
-            # it begins at the terminals, crosses the transparent tubes, then
-            # accumulates as glowing liquid behind the label. It stays inside
-            # this well for the duration of the hover rather than radiating
-            # around the button body.
-            reservoir = QLinearGradient(label_well.left(), label_well.center().y(),
-                                        label_well.right(), label_well.center().y())
-            reservoir.setColorAt(0.0, QColor(0, 0, 0, 0))
-            reservoir.setColorAt(0.20, QColor(glow.red(), glow.green(), glow.blue(), 38))
-            reservoir.setColorAt(0.40, QColor(glow.red(), glow.green(), glow.blue(), 94))
-            reservoir.setColorAt(0.50, QColor(246, 252, 255, 118))
-            reservoir.setColorAt(0.60, QColor(glow.red(), glow.green(), glow.blue(), 94))
-            reservoir.setColorAt(0.80, QColor(glow.red(), glow.green(), glow.blue(), 38))
-            reservoir.setColorAt(1.0, QColor(0, 0, 0, 0))
-            painter.save()
-            painter.setOpacity(0.58 + 0.42 * hover_arrival)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(reservoir))
-            painter.setCompositionMode(QPainter.CompositionMode_Screen)
-            painter.drawRoundedRect(label_well, 7, 7)
             painter.restore()
         painter.setPen(QColor("#fbf5de"))
         self._draw_fitted_text(
