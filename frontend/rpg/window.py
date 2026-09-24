@@ -4501,32 +4501,41 @@ class ArchiveboundCanvas(QWidget):
         painter.restore()
 
     def _paint_title_background(self, painter: QPainter):
-        """Layer quiet, fixed-register Bellglass atmosphere over the title art."""
+        """Layer a restrained, authored Bellglass atmosphere over the title art."""
         if self.title_background.isNull():
             painter.drawPixmap(self.rect(), self.backgrounds["hub"])
             return
         painter.drawPixmap(self.rect(), self.title_background)
         if self.title_smoke_frames:
+            # The smoke is the slowest motion in the composition.  It keeps
+            # the depth planes alive without asking the eye to follow it.
+            smoke_phase = self.world_clock / 18.0
+            smoke_opacity = 0.065 + 0.012 * (0.5 + 0.5 * math.sin(self.world_clock / 150.0))
             painter.save()
-            painter.setOpacity(0.08)
+            painter.setOpacity(smoke_opacity)
             self._draw_blended_title_frames(
                 painter, QRectF(0, 432, GAME_WIDTH, 180),
-                self.title_smoke_frames, self.world_clock / 14.0,
+                self.title_smoke_frames, smoke_phase,
                 stretch=True,
             )
             painter.restore()
-        # An intermittent 32-frame ember sequence brings the Bellglass Fire
-        # forward periodically, with a long fade instead of a visible restart.
-        ember_cycle = self.world_clock % 900
-        if self.title_embers_frames and 160 <= ember_cycle < 650:
-            ember_progress = (ember_cycle - 160) / 490.0
-            ember_opacity = 0.14 * math.sin(math.pi * ember_progress)
+        # The embers are a discrete authored passage, not a perpetual particle
+        # loop: they enter from the fire, cross the scene once, and disappear
+        # before the next quiet interval. This keeps the Bellglass Fire present
+        # without the predictable "screensaver" feeling of a constant effect.
+        ember_cycle = self.world_clock % 1200
+        ember_start = 180
+        ember_duration = 420
+        if self.title_embers_frames and ember_start <= ember_cycle < ember_start + ember_duration:
+            ember_progress = (ember_cycle - ember_start) / ember_duration
+            ember_opacity = 0.15 * math.sin(math.pi * ember_progress) ** 1.35
             painter.save()
             painter.setOpacity(max(0.0, ember_opacity))
+            painter.setCompositionMode(QPainter.CompositionMode_Screen)
             self._draw_blended_title_frames(
                 painter, QRectF(0, 390, GAME_WIDTH, 188),
                 self.title_embers_frames,
-                (ember_cycle - 160) / 15.0,
+                ember_progress * (len(self.title_embers_frames) - 1),
                 stretch=True,
             )
             painter.restore()
@@ -4546,11 +4555,17 @@ class ArchiveboundCanvas(QWidget):
             )
             painter.restore()
         if self.title_main_energy_course_frames:
+            # Let the title ornament remain fixed. Only a low-amplitude glow
+            # moves through it, with a long period so it reads as living metal
+            # rather than a bobbing decorative GIF.
+            title_energy_opacity = 0.17 + 0.075 * (
+                0.5 + 0.5 * math.sin(self.world_clock / 118.0)
+            )
             painter.save()
-            painter.setOpacity(0.26)
+            painter.setOpacity(title_energy_opacity)
             self._draw_blended_title_frames(
                 painter, QRectF(74, 20, 812, 222), self.title_main_energy_course_frames,
-                self.world_clock / 30.0,
+                self.world_clock / 39.0,
             )
             painter.restore()
 
@@ -7262,32 +7277,58 @@ class ArchiveboundCanvas(QWidget):
                 painter.drawRoundedRect(target.adjusted(inset, 28, -inset, -28), 10, 10)
             painter.restore()
         self._draw_pixmap_contained(painter, target, frames[0])
-        # Hover energy follows the actual authored route: side cylinders feed
-        # both tubes, then pool and circulate behind the label well.
-        inner_panel = target.adjusted(24, 35, -24, -35)
+        # The authored ribbon occupies the physical route from each cylinder,
+        # along the tubes, and into the label well.  The brighter hold below is
+        # clipped to the well, so the hover remains readable rather than loud.
+        flow_channel = target.adjusted(14, 33, -14, -33)
+        label_well = target.adjusted(82, 42, -82, -42)
         if button_id == "continue":
             # The Continue sheet's energy band is registered lower than the
             # New Game band. Align its authored centroid with the label well.
-            inner_panel.translate(0, -7)
+            flow_channel.translate(0, -9)
+        else:
+            # The New Game sheet has a smaller registration difference.
+            flow_channel.translate(0, -3)
         if pressed and idle_core_frames:
             # Frames 5-8 are the authored one-shot ignition/release sequence.
             painter.save()
             painter.setOpacity(0.92)
             painter.setCompositionMode(QPainter.CompositionMode_Screen)
             self._draw_blended_title_frames(
-                painter, inner_panel, idle_core_frames,
+                painter, flow_channel, idle_core_frames,
                 4.0 + min(1.60, elapsed_press * 0.40), cover=True, focus_y=0.85,
             )
             painter.restore()
         elif hovering and hover_core_frames:
-            # Thirty-two near-identical authored poses form one continuous
-            # cylinder-to-tube-to-center flow for the duration of the hover.
+            # A soft arrival is critical: immediately presenting a bright loop
+            # makes a UI feel jumpy. After the short reveal, thirty-two authored
+            # poses calmly carry energy cylinder -> tube -> label well.
+            hover_arrival = min(1.0, elapsed_hover / 18.0)
+            hover_arrival = hover_arrival * hover_arrival * (3.0 - 2.0 * hover_arrival)
             painter.save()
-            painter.setOpacity(0.40)
+            painter.setOpacity(0.12 + 0.31 * hover_arrival)
+            painter.setCompositionMode(QPainter.CompositionMode_Screen)
             self._draw_blended_title_frames(
-                painter, inner_panel, hover_core_frames,
-                elapsed_hover / 11.5, stretch=True,
+                painter, flow_channel, hover_core_frames,
+                elapsed_hover / 13.5, stretch=True,
             )
+            painter.restore()
+            # A static, low-opacity energy reservoir gives the moving ribbon a
+            # clear destination. It is deliberately confined to the label well
+            # and only reveals after the same gentle hover arrival.
+            reservoir = QLinearGradient(label_well.left(), label_well.center().y(),
+                                        label_well.right(), label_well.center().y())
+            reservoir.setColorAt(0.0, QColor(0, 0, 0, 0))
+            reservoir.setColorAt(0.28, QColor(glow.red(), glow.green(), glow.blue(), 18))
+            reservoir.setColorAt(0.50, QColor(glow.red(), glow.green(), glow.blue(), 54))
+            reservoir.setColorAt(0.72, QColor(glow.red(), glow.green(), glow.blue(), 18))
+            reservoir.setColorAt(1.0, QColor(0, 0, 0, 0))
+            painter.save()
+            painter.setOpacity(hover_arrival)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(reservoir))
+            painter.setCompositionMode(QPainter.CompositionMode_Screen)
+            painter.drawRoundedRect(label_well, 7, 7)
             painter.restore()
         painter.setPen(QColor("#fbf5de"))
         self._draw_fitted_text(
