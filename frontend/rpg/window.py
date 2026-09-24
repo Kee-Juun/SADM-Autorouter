@@ -4510,7 +4510,7 @@ class ArchiveboundCanvas(QWidget):
             # The smoke is the slowest motion in the composition.  It keeps
             # the depth planes alive without asking the eye to follow it.
             smoke_phase = self.world_clock / 18.0
-            smoke_opacity = 0.065 + 0.012 * (0.5 + 0.5 * math.sin(self.world_clock / 150.0))
+            smoke_opacity = 0.095 + 0.018 * (0.5 + 0.5 * math.sin(self.world_clock / 150.0))
             painter.save()
             painter.setOpacity(smoke_opacity)
             self._draw_blended_title_frames(
@@ -4528,7 +4528,7 @@ class ArchiveboundCanvas(QWidget):
         ember_duration = 420
         if self.title_embers_frames and ember_start <= ember_cycle < ember_start + ember_duration:
             ember_progress = (ember_cycle - ember_start) / ember_duration
-            ember_opacity = 0.15 * math.sin(math.pi * ember_progress) ** 1.35
+            ember_opacity = 0.24 * math.sin(math.pi * ember_progress) ** 1.35
             painter.save()
             painter.setOpacity(max(0.0, ember_opacity))
             painter.setCompositionMode(QPainter.CompositionMode_Screen)
@@ -4558,7 +4558,7 @@ class ArchiveboundCanvas(QWidget):
             # Let the title ornament remain fixed. Only a low-amplitude glow
             # moves through it, with a long period so it reads as living metal
             # rather than a bobbing decorative GIF.
-            title_energy_opacity = 0.17 + 0.075 * (
+            title_energy_opacity = 0.24 + 0.10 * (
                 0.5 + 0.5 * math.sin(self.world_clock / 118.0)
             )
             painter.save()
@@ -7306,25 +7306,40 @@ class ArchiveboundCanvas(QWidget):
             hover_arrival = min(1.0, elapsed_hover / 18.0)
             hover_arrival = hover_arrival * hover_arrival * (3.0 - 2.0 * hover_arrival)
             painter.save()
-            painter.setOpacity(0.12 + 0.31 * hover_arrival)
+            painter.setOpacity(0.28 + 0.36 * hover_arrival)
             painter.setCompositionMode(QPainter.CompositionMode_Screen)
             self._draw_blended_title_frames(
                 painter, flow_channel, hover_core_frames,
                 elapsed_hover / 13.5, stretch=True,
             )
             painter.restore()
-            # A static, low-opacity energy reservoir gives the moving ribbon a
-            # clear destination. It is deliberately confined to the label well
-            # and only reveals after the same gentle hover arrival.
+            # A second, low-energy additive pass preserves the authored plasma
+            # shapes but raises contrast enough for the tube travel to survive
+            # against the dark Bellglass background.
+            painter.save()
+            painter.setOpacity(0.12 + 0.16 * hover_arrival)
+            painter.setCompositionMode(QPainter.CompositionMode_Plus)
+            self._draw_blended_title_frames(
+                painter, flow_channel, hover_core_frames,
+                elapsed_hover / 13.5, stretch=True,
+            )
+            painter.restore()
+            # The reservoir is the destination of both authored tube flows:
+            # it begins at the terminals, crosses the transparent tubes, then
+            # accumulates as glowing liquid behind the label. It stays inside
+            # this well for the duration of the hover rather than radiating
+            # around the button body.
             reservoir = QLinearGradient(label_well.left(), label_well.center().y(),
                                         label_well.right(), label_well.center().y())
             reservoir.setColorAt(0.0, QColor(0, 0, 0, 0))
-            reservoir.setColorAt(0.28, QColor(glow.red(), glow.green(), glow.blue(), 18))
-            reservoir.setColorAt(0.50, QColor(glow.red(), glow.green(), glow.blue(), 54))
-            reservoir.setColorAt(0.72, QColor(glow.red(), glow.green(), glow.blue(), 18))
+            reservoir.setColorAt(0.20, QColor(glow.red(), glow.green(), glow.blue(), 38))
+            reservoir.setColorAt(0.40, QColor(glow.red(), glow.green(), glow.blue(), 94))
+            reservoir.setColorAt(0.50, QColor(246, 252, 255, 118))
+            reservoir.setColorAt(0.60, QColor(glow.red(), glow.green(), glow.blue(), 94))
+            reservoir.setColorAt(0.80, QColor(glow.red(), glow.green(), glow.blue(), 38))
             reservoir.setColorAt(1.0, QColor(0, 0, 0, 0))
             painter.save()
-            painter.setOpacity(hover_arrival)
+            painter.setOpacity(0.58 + 0.42 * hover_arrival)
             painter.setPen(Qt.NoPen)
             painter.setBrush(QBrush(reservoir))
             painter.setCompositionMode(QPainter.CompositionMode_Screen)
