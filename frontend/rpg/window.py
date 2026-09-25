@@ -21,6 +21,7 @@ from PyQt5.QtGui import (
     QPen,
     QPixmap,
     QPolygonF,
+    QRadialGradient,
     QRegion,
     QTransform,
 )
@@ -261,23 +262,11 @@ class ArchiveboundCanvas(QWidget):
         self.title_continue_core_frames = self._uniform_grid_atlas_frames(
             self.title_continue_core_atlas, 2, 4
         )
-        self.title_continue_energy_atlas = QPixmap(
-            str(ASSET_DIR / "title_button_continue_energy_overlay_atlas_v8.png")
-        )
-        self.title_continue_energy_frames = self._grid_atlas_cells(
-            self.title_continue_energy_atlas, 3, 9
-        )
         self.title_new_game_core_atlas = QPixmap(
             str(ASSET_DIR / "title_button_new_game_core_atlas_v3.png")
         )
         self.title_new_game_core_frames = self._uniform_grid_atlas_frames(
             self.title_new_game_core_atlas, 2, 4
-        )
-        self.title_new_game_energy_atlas = QPixmap(
-            str(ASSET_DIR / "title_button_new_game_energy_overlay_atlas_v8.png")
-        )
-        self.title_new_game_energy_frames = self._grid_atlas_cells(
-            self.title_new_game_energy_atlas, 4, 9
         )
         self.environment_sheets = {
             spec["sheet"]: QPixmap(str(ASSET_DIR / spec["sheet"]))
@@ -7222,11 +7211,6 @@ class ArchiveboundCanvas(QWidget):
             if button_id == "continue"
             else self.title_new_game_core_frames
         )
-        energy_frames = (
-            self.title_continue_energy_frames
-            if button_id == "continue"
-            else self.title_new_game_energy_frames
-        )
         glow = QColor("#75f5ed" if button_id == "continue" else "#c987ff")
         if pressed:
             painter.save()
@@ -7238,35 +7222,10 @@ class ArchiveboundCanvas(QWidget):
                 painter.drawRoundedRect(target.adjusted(inset, 28, -inset, -28), 10, 10)
             painter.restore()
         self._draw_pixmap_contained(painter, target, frames[0])
-        if hovering and energy_frames:
-            # One hover has two intentional chapters. The first sixteen frames
-            # ignite both terminals and send plasma inward once. The latter
-            # frames form a five-second looping liquid reservoir after the
-            # streams have converged; restarting at frame one would break the
-            # physics, while a longer loop made the idle state feel static.
-            transport_count = min(16, len(energy_frames) - 1)
-            transport_frames = min(float(transport_count), elapsed_hover / 5.0)
-            if elapsed_hover <= 80:
-                plasma_phase = transport_frames
-            else:
-                sustain_count = max(1, len(energy_frames) - transport_count)
-                plasma_phase = transport_count + (
-                    (elapsed_hover - 80) * sustain_count / 150.0
-                ) % sustain_count
-            painter.save()
-            painter.setOpacity(0.92)
-            painter.setCompositionMode(QPainter.CompositionMode_Screen)
-            # Generated energy includes a faint gaseous halo around its source
-            # terminals. Clip it to the actual metal button channel so only the
-            # terminal cores, glass tubes, and central label well can light up.
-            energy_channel = target.adjusted(10, 31, -10, -31)
-            energy_clip = QPainterPath()
-            energy_clip.addRoundedRect(energy_channel, 10, 10)
-            painter.setClipPath(energy_clip, Qt.IntersectClip)
-            self._draw_blended_title_frames(
-                painter, target, energy_frames, plasma_phase, stretch=True,
+        if hovering:
+            self._paint_title_button_hover_energy(
+                painter, target, button_id, elapsed_hover
             )
-            painter.restore()
         # Click ignition remains a contained one-shot over the same physical
         # channel and never moves the button plate.
         flow_channel = target.adjusted(14, 33, -14, -33)
@@ -7297,6 +7256,78 @@ class ArchiveboundCanvas(QWidget):
             True,
             Qt.AlignCenter | Qt.TextSingleLine,
         )
+
+    def _paint_title_button_hover_energy(
+        self, painter: QPainter, target: QRectF, button_id: str, elapsed: int
+    ) -> None:
+        """Render a precise terminal-to-reservoir hover treatment on the real plate."""
+        color = QColor("#75f5ed" if button_id == "continue" else "#c987ff")
+        # These positions are expressed against the existing button sprite, not
+        # a second art asset. The result cannot shift or replace the plate.
+        channel = QRectF(target.left() + 27, target.center().y() - 19,
+                         target.width() - 54, 38)
+        left_terminal = QRectF(channel.left() + 3, channel.center().y() - 11, 22, 22)
+        right_terminal = QRectF(channel.right() - 25, channel.center().y() - 11, 22, 22)
+        well = QRectF(target.center().x() - 76, channel.center().y() - 12, 152, 24)
+        left_tube = QRectF(left_terminal.center().x(), channel.center().y() - 4,
+                           well.left() - left_terminal.center().x(), 8)
+        right_tube = QRectF(well.right(), channel.center().y() - 4,
+                            right_terminal.center().x() - well.right(), 8)
+        # The fill-in is deliberately quick enough to read as a response, then
+        # settles into a five-second low-amplitude liquid circulation.
+        travel = min(1.0, elapsed / 32.0)
+        smooth_travel = travel * travel * (3.0 - 2.0 * travel)
+        pool = max(0.0, min(1.0, (smooth_travel - 0.42) / 0.58))
+        pool = pool * pool * (3.0 - 2.0 * pool)
+        idle_phase = max(0.0, elapsed - 32) / 24.0
+        pulse = 0.72 + 0.28 * (0.5 + 0.5 * math.sin(idle_phase))
+
+        clip = QPainterPath()
+        clip.addRoundedRect(channel, 10, 10)
+        painter.save()
+        painter.setClipPath(clip, Qt.IntersectClip)
+        painter.setCompositionMode(QPainter.CompositionMode_Screen)
+        painter.setPen(Qt.NoPen)
+
+        # Both terminal chambers energize first.
+        for terminal in (left_terminal, right_terminal):
+            terminal_glow = QRadialGradient(terminal.center(), terminal.width() * 0.72)
+            terminal_glow.setColorAt(0.0, QColor(246, 253, 255, int(178 * pulse)))
+            terminal_glow.setColorAt(0.30, QColor(color.red(), color.green(), color.blue(), int(166 * pulse)))
+            terminal_glow.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), 0))
+            painter.setBrush(QBrush(terminal_glow))
+            painter.drawEllipse(terminal)
+
+        # Plasma advances from each terminal through its own glass tube; no
+        # particles are allowed beyond the channel or outside the plate.
+        for tube, from_left in ((left_tube, True), (right_tube, False)):
+            fill = QRectF(tube)
+            fill.setWidth(tube.width() * smooth_travel)
+            if not from_left:
+                fill.moveRight(tube.right())
+            tube_glow = QLinearGradient(
+                fill.left() if from_left else fill.right(), fill.center().y(),
+                fill.right() if from_left else fill.left(), fill.center().y(),
+            )
+            tube_glow.setColorAt(0.0, QColor(color.red(), color.green(), color.blue(), 138))
+            tube_glow.setColorAt(0.72, QColor(color.red(), color.green(), color.blue(), 68))
+            tube_glow.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), 10))
+            painter.setBrush(QBrush(tube_glow))
+            painter.drawRoundedRect(fill, 4, 4)
+
+        # Once both streams meet, a centered, self-contained liquid reservoir
+        # forms behind the label. Only a small internal highlight travels.
+        if pool > 0.0:
+            reservoir = QRadialGradient(
+                QPointF(well.center().x() + math.sin(idle_phase) * 13, well.center().y()),
+                well.width() * 0.52,
+            )
+            reservoir.setColorAt(0.0, QColor(247, 253, 255, int(150 * pool * pulse)))
+            reservoir.setColorAt(0.34, QColor(color.red(), color.green(), color.blue(), int(132 * pool)))
+            reservoir.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), int(25 * pool)))
+            painter.setBrush(QBrush(reservoir))
+            painter.drawRoundedRect(well, 9, 9)
+        painter.restore()
 
     def _button(self, painter, rect: QRect, text: str, color: str, small: bool = False):
         painter.setPen(QPen(QColor("#d7c778"), 1))
