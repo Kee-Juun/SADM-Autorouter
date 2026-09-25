@@ -7278,8 +7278,8 @@ class ArchiveboundCanvas(QWidget):
                         right_terminal.center().x() - well.right(), 6), False),
             )
         else:
-            # New Game does not have a center shaft: its two side terminals
-            # feed independent upper/lower pipes that meet at the label well.
+            # New Game uses upper, lower, and centerline runs which all feed
+            # the recessed repository between the side mechanisms.
             channel = QRectF(target.left() + 20, target.top() + 20,
                              target.width() - 40, target.height() - 36)
             left_terminal = QRectF(target.left() + 19, target.center().y() - 8, 16, 16)
@@ -7293,11 +7293,24 @@ class ArchiveboundCanvas(QWidget):
             left_pipe_start = target.left() + 52
             right_pipe_end = target.right() - 52
             pipe_mid = target.center().x()
+            # These are the two centerline transfer tubes beside the
+            # repository: the practical route that carries the streams from
+            # the side machinery into the liquid chamber.
+            middle_y = target.center().y() - 3
+            # Begin at the inner edge of each side assembly so the liquid
+            # occupies the full visible glass length, rather than stopping
+            # short of the centerline transfer tubes.
+            left_middle_start = target.left() + 35
+            right_middle_end = target.right() - 35
             tubes = (
                 (QRectF(left_pipe_start, upper_y, pipe_mid - left_pipe_start, 6), True),
                 (QRectF(pipe_mid, upper_y, right_pipe_end - pipe_mid, 6), False),
                 (QRectF(left_pipe_start, lower_y, pipe_mid - left_pipe_start, 6), True),
                 (QRectF(pipe_mid, lower_y, right_pipe_end - pipe_mid, 6), False),
+                (QRectF(left_middle_start, middle_y,
+                        well.left() - left_middle_start, 6), True),
+                (QRectF(well.right(), middle_y,
+                        right_middle_end - well.right(), 6), False),
             )
         # Terminal discharge reaches the glasswork in under half a second, then
         # settles into a five-second low-amplitude liquid circulation.
@@ -7369,8 +7382,10 @@ class ArchiveboundCanvas(QWidget):
             # The repository is a beveled metal recess, not a pill-shaped
             # label. Match that silhouette and inset it well inside the bronze
             # rim so the liquid cannot touch or bleed over the frame.
-            liquid_repository = well.adjusted(8, 5, -8, -5)
-            bevel = min(7.0, liquid_repository.height() * 0.38)
+            # Leave only the actual bronze lip uncovered: this makes the
+            # liquid read as a filled chamber rather than a glow behind text.
+            liquid_repository = well.adjusted(5, 4, -5, -4)
+            bevel = min(6.0, liquid_repository.height() * 0.38)
             repository_mask = QPainterPath()
             repository_mask.moveTo(liquid_repository.left() + bevel, liquid_repository.top())
             repository_mask.lineTo(liquid_repository.right() - bevel, liquid_repository.top())
@@ -7390,18 +7405,24 @@ class ArchiveboundCanvas(QWidget):
             repository_body = QLinearGradient(
                 liquid_level.topLeft(), liquid_level.bottomLeft()
             )
-            repository_body.setColorAt(0.0, QColor(color.red(), color.green(), color.blue(), int(118 * pool)))
-            repository_body.setColorAt(0.50, QColor(color.red(), color.green(), color.blue(), int(154 * pool)))
-            repository_body.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), int(104 * pool)))
+            repository_body.setColorAt(0.0, QColor(color.red(), color.green(), color.blue(), int(170 * pool)))
+            repository_body.setColorAt(0.50, QColor(color.red(), color.green(), color.blue(), int(210 * pool)))
+            repository_body.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), int(158 * pool)))
             painter.save()
             painter.setClipPath(repository_mask, Qt.IntersectClip)
             painter.fillRect(liquid_level, QBrush(repository_body))
+            # A tight bright meniscus makes the fill level physically legible;
+            # the repository mask keeps it entirely inside the inner chamber.
+            meniscus = QRectF(
+                liquid_level.left(), liquid_level.top(), liquid_level.width(), 1.25
+            )
+            painter.fillRect(meniscus, QColor(247, 253, 255, int(190 * pool)))
             reservoir = QRadialGradient(
                 QPointF(well.center().x() + math.sin(idle_phase) * 13, well.center().y()),
                 liquid_repository.width() * 0.46,
             )
-            reservoir.setColorAt(0.0, QColor(247, 253, 255, int(126 * pool * pulse)))
-            reservoir.setColorAt(0.34, QColor(color.red(), color.green(), color.blue(), int(74 * pool)))
+            reservoir.setColorAt(0.0, QColor(247, 253, 255, int(150 * pool * pulse)))
+            reservoir.setColorAt(0.34, QColor(color.red(), color.green(), color.blue(), int(108 * pool)))
             reservoir.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), 0))
             painter.fillRect(liquid_level, QBrush(reservoir))
             painter.restore()
