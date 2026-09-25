@@ -261,11 +261,11 @@ class ArchiveboundCanvas(QWidget):
         self.title_continue_core_frames = self._uniform_grid_atlas_frames(
             self.title_continue_core_atlas, 2, 4
         )
-        self.title_continue_plasma_atlas = QPixmap(
-            str(ASSET_DIR / "title_button_continue_plasma_atlas_v7.png")
+        self.title_continue_energy_atlas = QPixmap(
+            str(ASSET_DIR / "title_button_continue_energy_overlay_atlas_v8.png")
         )
-        self.title_continue_plasma_frames = self._grid_atlas_cells(
-            self.title_continue_plasma_atlas, 3, 9
+        self.title_continue_energy_frames = self._grid_atlas_cells(
+            self.title_continue_energy_atlas, 3, 9
         )
         self.title_new_game_core_atlas = QPixmap(
             str(ASSET_DIR / "title_button_new_game_core_atlas_v3.png")
@@ -273,11 +273,11 @@ class ArchiveboundCanvas(QWidget):
         self.title_new_game_core_frames = self._uniform_grid_atlas_frames(
             self.title_new_game_core_atlas, 2, 4
         )
-        self.title_new_game_plasma_atlas = QPixmap(
-            str(ASSET_DIR / "title_button_new_game_plasma_atlas_v7.png")
+        self.title_new_game_energy_atlas = QPixmap(
+            str(ASSET_DIR / "title_button_new_game_energy_overlay_atlas_v8.png")
         )
-        self.title_new_game_plasma_frames = self._grid_atlas_cells(
-            self.title_new_game_plasma_atlas, 4, 9
+        self.title_new_game_energy_frames = self._grid_atlas_cells(
+            self.title_new_game_energy_atlas, 4, 9
         )
         self.environment_sheets = {
             spec["sheet"]: QPixmap(str(ASSET_DIR / spec["sheet"]))
@@ -7222,10 +7222,10 @@ class ArchiveboundCanvas(QWidget):
             if button_id == "continue"
             else self.title_new_game_core_frames
         )
-        plasma_frames = (
-            self.title_continue_plasma_frames
+        energy_frames = (
+            self.title_continue_energy_frames
             if button_id == "continue"
-            else self.title_new_game_plasma_frames
+            else self.title_new_game_energy_frames
         )
         glow = QColor("#75f5ed" if button_id == "continue" else "#c987ff")
         if pressed:
@@ -7237,25 +7237,28 @@ class ArchiveboundCanvas(QWidget):
                 painter.setPen(QPen(ring, width))
                 painter.drawRoundedRect(target.adjusted(inset, 28, -inset, -28), 10, 10)
             painter.restore()
-        if hovering and plasma_frames:
+        self._draw_pixmap_contained(painter, target, frames[0])
+        if hovering and energy_frames:
             # One hover has two intentional chapters. The first sixteen frames
             # ignite both terminals and send plasma inward once. The latter
             # sixteen are a slow, looping liquid reservoir after the streams
             # have converged; restarting at frame one would break the physics.
-            transport_count = min(16, len(plasma_frames) - 1)
+            transport_count = min(16, len(energy_frames) - 1)
             transport_frames = min(float(transport_count), elapsed_hover / 5.0)
             if elapsed_hover <= 80:
                 plasma_phase = transport_frames
             else:
-                sustain_count = max(1, len(plasma_frames) - transport_count)
+                sustain_count = max(1, len(energy_frames) - transport_count)
                 plasma_phase = transport_count + (
                     (elapsed_hover - 80) / 19.0
                 ) % sustain_count
+            painter.save()
+            painter.setOpacity(0.92)
+            painter.setCompositionMode(QPainter.CompositionMode_Screen)
             self._draw_blended_title_frames(
-                painter, target, plasma_frames, plasma_phase, stretch=True,
+                painter, target, energy_frames, plasma_phase, stretch=True,
             )
-        else:
-            self._draw_pixmap_contained(painter, target, frames[0])
+            painter.restore()
         # Click ignition remains a contained one-shot over the same physical
         # channel and never moves the button plate.
         flow_channel = target.adjusted(14, 33, -14, -33)
