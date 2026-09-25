@@ -7264,18 +7264,40 @@ class ArchiveboundCanvas(QWidget):
         color = QColor("#75f5ed" if button_id == "continue" else "#c987ff")
         # These positions are expressed against the existing button sprite, not
         # a second art asset. The result cannot shift or replace the plate.
-        channel = QRectF(target.left() + 27, target.center().y() - 19,
-                         target.width() - 54, 38)
-        left_terminal = QRectF(channel.left() + 3, channel.center().y() - 11, 22, 22)
-        right_terminal = QRectF(channel.right() - 25, channel.center().y() - 11, 22, 22)
-        well = QRectF(target.center().x() - 76, channel.center().y() - 12, 152, 24)
-        left_tube = QRectF(left_terminal.center().x(), channel.center().y() - 4,
-                           well.left() - left_terminal.center().x(), 8)
-        right_tube = QRectF(well.right(), channel.center().y() - 4,
-                            right_terminal.center().x() - well.right(), 8)
-        # The fill-in is deliberately quick enough to read as a response, then
+        if button_id == "continue":
+            # Continue's blue terminal bulbs feed the single horizontal shaft.
+            channel = QRectF(target.left() + 26, target.center().y() - 18,
+                             target.width() - 52, 36)
+            left_terminal = QRectF(target.left() + 24, target.center().y() - 10, 22, 20)
+            right_terminal = QRectF(target.right() - 46, target.center().y() - 10, 22, 20)
+            well = QRectF(target.center().x() - 74, channel.center().y() - 11, 148, 22)
+            tubes = (
+                (QRectF(left_terminal.center().x(), channel.center().y() - 3,
+                        well.left() - left_terminal.center().x(), 6), True),
+                (QRectF(well.right(), channel.center().y() - 3,
+                        right_terminal.center().x() - well.right(), 6), False),
+            )
+        else:
+            # New Game does not have a center shaft: its two side terminals
+            # feed independent upper/lower pipes that meet at the label well.
+            channel = QRectF(target.left() + 20, target.top() + 20,
+                             target.width() - 40, target.height() - 36)
+            left_terminal = QRectF(target.left() + 17, target.center().y() - 10, 20, 20)
+            right_terminal = QRectF(target.right() - 37, target.center().y() - 10, 20, 20)
+            well = QRectF(target.center().x() - 74, target.center().y() - 12, 148, 24)
+            upper_y = target.top() + 25
+            lower_y = target.bottom() - 28
+            left_pipe_start = target.left() + 52
+            right_pipe_end = target.right() - 52
+            tubes = (
+                (QRectF(left_pipe_start, upper_y, well.left() - left_pipe_start, 6), True),
+                (QRectF(well.right(), upper_y, right_pipe_end - well.right(), 6), False),
+                (QRectF(left_pipe_start, lower_y, well.left() - left_pipe_start, 6), True),
+                (QRectF(well.right(), lower_y, right_pipe_end - well.right(), 6), False),
+            )
+        # Terminal discharge reaches the glasswork in under half a second, then
         # settles into a five-second low-amplitude liquid circulation.
-        travel = min(1.0, elapsed / 32.0)
+        travel = min(1.0, elapsed / 14.0)
         smooth_travel = travel * travel * (3.0 - 2.0 * travel)
         pool = max(0.0, min(1.0, (smooth_travel - 0.42) / 0.58))
         pool = pool * pool * (3.0 - 2.0 * pool)
@@ -7300,7 +7322,7 @@ class ArchiveboundCanvas(QWidget):
 
         # Plasma advances from each terminal through its own glass tube; no
         # particles are allowed beyond the channel or outside the plate.
-        for tube, from_left in ((left_tube, True), (right_tube, False)):
+        for tube, from_left in tubes:
             fill = QRectF(tube)
             fill.setWidth(tube.width() * smooth_travel)
             if not from_left:
