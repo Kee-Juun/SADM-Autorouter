@@ -7241,8 +7241,9 @@ class ArchiveboundCanvas(QWidget):
         if hovering and energy_frames:
             # One hover has two intentional chapters. The first sixteen frames
             # ignite both terminals and send plasma inward once. The latter
-            # sixteen are a slow, looping liquid reservoir after the streams
-            # have converged; restarting at frame one would break the physics.
+            # frames form a five-second looping liquid reservoir after the
+            # streams have converged; restarting at frame one would break the
+            # physics, while a longer loop made the idle state feel static.
             transport_count = min(16, len(energy_frames) - 1)
             transport_frames = min(float(transport_count), elapsed_hover / 5.0)
             if elapsed_hover <= 80:
@@ -7250,11 +7251,18 @@ class ArchiveboundCanvas(QWidget):
             else:
                 sustain_count = max(1, len(energy_frames) - transport_count)
                 plasma_phase = transport_count + (
-                    (elapsed_hover - 80) / 19.0
+                    (elapsed_hover - 80) * sustain_count / 150.0
                 ) % sustain_count
             painter.save()
             painter.setOpacity(0.92)
             painter.setCompositionMode(QPainter.CompositionMode_Screen)
+            # Generated energy includes a faint gaseous halo around its source
+            # terminals. Clip it to the actual metal button channel so only the
+            # terminal cores, glass tubes, and central label well can light up.
+            energy_channel = target.adjusted(10, 31, -10, -31)
+            energy_clip = QPainterPath()
+            energy_clip.addRoundedRect(energy_channel, 10, 10)
+            painter.setClipPath(energy_clip, Qt.IntersectClip)
             self._draw_blended_title_frames(
                 painter, target, energy_frames, plasma_phase, stretch=True,
             )
