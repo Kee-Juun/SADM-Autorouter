@@ -7268,8 +7268,8 @@ class ArchiveboundCanvas(QWidget):
             # Continue's blue terminal bulbs feed the single horizontal shaft.
             channel = QRectF(target.left() + 26, target.center().y() - 18,
                              target.width() - 52, 36)
-            left_terminal = QRectF(target.left() + 24, target.center().y() - 10, 22, 20)
-            right_terminal = QRectF(target.right() - 46, target.center().y() - 10, 22, 20)
+            left_terminal = QRectF(target.left() + 27, target.center().y() - 8, 16, 16)
+            right_terminal = QRectF(target.right() - 43, target.center().y() - 8, 16, 16)
             well = QRectF(target.center().x() - 74, channel.center().y() - 11, 148, 22)
             tubes = (
                 (QRectF(left_terminal.center().x(), channel.center().y() - 3,
@@ -7282,18 +7282,22 @@ class ArchiveboundCanvas(QWidget):
             # feed independent upper/lower pipes that meet at the label well.
             channel = QRectF(target.left() + 20, target.top() + 20,
                              target.width() - 40, target.height() - 36)
-            left_terminal = QRectF(target.left() + 17, target.center().y() - 10, 20, 20)
-            right_terminal = QRectF(target.right() - 37, target.center().y() - 10, 20, 20)
-            well = QRectF(target.center().x() - 74, target.center().y() - 12, 148, 24)
+            left_terminal = QRectF(target.left() + 19, target.center().y() - 8, 16, 16)
+            right_terminal = QRectF(target.right() - 35, target.center().y() - 8, 16, 16)
+            # Fill the actual dark repository interior, not merely the text's
+            # bounding box. Its bronze rim remains visible around the liquid.
+            well = QRectF(target.left() + 72, target.top() + 39,
+                          target.width() - 144, 32)
             upper_y = target.top() + 25
             lower_y = target.bottom() - 28
             left_pipe_start = target.left() + 52
             right_pipe_end = target.right() - 52
+            pipe_mid = target.center().x()
             tubes = (
-                (QRectF(left_pipe_start, upper_y, well.left() - left_pipe_start, 6), True),
-                (QRectF(well.right(), upper_y, right_pipe_end - well.right(), 6), False),
-                (QRectF(left_pipe_start, lower_y, well.left() - left_pipe_start, 6), True),
-                (QRectF(well.right(), lower_y, right_pipe_end - well.right(), 6), False),
+                (QRectF(left_pipe_start, upper_y, pipe_mid - left_pipe_start, 6), True),
+                (QRectF(pipe_mid, upper_y, right_pipe_end - pipe_mid, 6), False),
+                (QRectF(left_pipe_start, lower_y, pipe_mid - left_pipe_start, 6), True),
+                (QRectF(pipe_mid, lower_y, right_pipe_end - pipe_mid, 6), False),
             )
         # Terminal discharge reaches the glasswork in under half a second, then
         # settles into a five-second low-amplitude liquid circulation.
@@ -7320,9 +7324,9 @@ class ArchiveboundCanvas(QWidget):
 
         # Both terminal chambers energize first.
         for terminal in (left_terminal, right_terminal):
-            terminal_glow = QRadialGradient(terminal.center(), terminal.width() * 0.72)
-            terminal_glow.setColorAt(0.0, QColor(246, 253, 255, int(178 * pulse)))
-            terminal_glow.setColorAt(0.30, QColor(color.red(), color.green(), color.blue(), int(166 * pulse)))
+            terminal_glow = QRadialGradient(terminal.center(), terminal.width() * 0.48)
+            terminal_glow.setColorAt(0.0, QColor(246, 253, 255, int(150 * pulse)))
+            terminal_glow.setColorAt(0.35, QColor(color.red(), color.green(), color.blue(), int(132 * pulse)))
             terminal_glow.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), 0))
             painter.setBrush(QBrush(terminal_glow))
             painter.drawEllipse(terminal)
