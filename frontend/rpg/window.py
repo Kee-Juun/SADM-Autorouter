@@ -7324,12 +7324,14 @@ class ArchiveboundCanvas(QWidget):
 
         # Both terminal chambers energize first.
         for terminal in (left_terminal, right_terminal):
-            terminal_glow = QRadialGradient(terminal.center(), terminal.width() * 0.48)
-            terminal_glow.setColorAt(0.0, QColor(246, 253, 255, int(150 * pulse)))
-            terminal_glow.setColorAt(0.35, QColor(color.red(), color.green(), color.blue(), int(132 * pulse)))
+            # The high-energy core stays noticeably smaller than the visible
+            # terminal chamber; any surrounding halo is deliberately faint.
+            terminal_glow = QRadialGradient(terminal.center(), terminal.width() * 0.30)
+            terminal_glow.setColorAt(0.0, QColor(246, 253, 255, int(168 * pulse)))
+            terminal_glow.setColorAt(0.42, QColor(color.red(), color.green(), color.blue(), int(145 * pulse)))
             terminal_glow.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), 0))
             painter.setBrush(QBrush(terminal_glow))
-            painter.drawEllipse(terminal)
+            painter.drawEllipse(terminal.adjusted(4, 4, -4, -4))
 
         # Plasma advances from each terminal through its own glass tube; no
         # particles are allowed beyond the channel or outside the plate.
@@ -7338,28 +7340,50 @@ class ArchiveboundCanvas(QWidget):
             fill.setWidth(tube.width() * smooth_travel)
             if not from_left:
                 fill.moveRight(tube.right())
-            tube_glow = QLinearGradient(
-                fill.left() if from_left else fill.right(), fill.center().y(),
-                fill.right() if from_left else fill.left(), fill.center().y(),
+            # Keep the luminous liquid thinner than the glass tube. The soft
+            # halo is an inner lining, never a bloom that reaches the rim.
+            halo = fill.adjusted(0, 1, 0, -1)
+            halo_glow = QLinearGradient(
+                halo.left() if from_left else halo.right(), halo.center().y(),
+                halo.right() if from_left else halo.left(), halo.center().y(),
             )
-            tube_glow.setColorAt(0.0, QColor(color.red(), color.green(), color.blue(), 138))
-            tube_glow.setColorAt(0.72, QColor(color.red(), color.green(), color.blue(), 68))
-            tube_glow.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), 10))
+            halo_glow.setColorAt(0.0, QColor(color.red(), color.green(), color.blue(), 46))
+            halo_glow.setColorAt(0.72, QColor(color.red(), color.green(), color.blue(), 24))
+            halo_glow.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), 0))
+            painter.setBrush(QBrush(halo_glow))
+            painter.drawRoundedRect(halo, 2, 2)
+            liquid = fill.adjusted(0, 2, 0, -2)
+            tube_glow = QLinearGradient(
+                liquid.left() if from_left else liquid.right(), liquid.center().y(),
+                liquid.right() if from_left else liquid.left(), liquid.center().y(),
+            )
+            tube_glow.setColorAt(0.0, QColor(246, 253, 255, 190))
+            tube_glow.setColorAt(0.48, QColor(color.red(), color.green(), color.blue(), 178))
+            tube_glow.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), 30))
             painter.setBrush(QBrush(tube_glow))
-            painter.drawRoundedRect(fill, 4, 4)
+            painter.drawRoundedRect(liquid, 1, 1)
 
         # Once both streams meet, a centered, self-contained liquid reservoir
         # forms behind the label. Only a small internal highlight travels.
         if pool > 0.0:
+            liquid_repository = well.adjusted(4, 4, -4, -4)
+            repository_body = QLinearGradient(
+                liquid_repository.topLeft(), liquid_repository.bottomLeft()
+            )
+            repository_body.setColorAt(0.0, QColor(color.red(), color.green(), color.blue(), int(118 * pool)))
+            repository_body.setColorAt(0.50, QColor(color.red(), color.green(), color.blue(), int(154 * pool)))
+            repository_body.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), int(104 * pool)))
+            painter.setBrush(QBrush(repository_body))
+            painter.drawRoundedRect(liquid_repository, 7, 7)
             reservoir = QRadialGradient(
                 QPointF(well.center().x() + math.sin(idle_phase) * 13, well.center().y()),
-                well.width() * 0.52,
+                liquid_repository.width() * 0.46,
             )
-            reservoir.setColorAt(0.0, QColor(247, 253, 255, int(150 * pool * pulse)))
-            reservoir.setColorAt(0.34, QColor(color.red(), color.green(), color.blue(), int(132 * pool)))
-            reservoir.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), int(25 * pool)))
+            reservoir.setColorAt(0.0, QColor(247, 253, 255, int(126 * pool * pulse)))
+            reservoir.setColorAt(0.34, QColor(color.red(), color.green(), color.blue(), int(74 * pool)))
+            reservoir.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), 0))
             painter.setBrush(QBrush(reservoir))
-            painter.drawRoundedRect(well, 9, 9)
+            painter.drawRoundedRect(liquid_repository, 7, 7)
         painter.restore()
 
     def _button(self, painter, rect: QRect, text: str, color: str, small: bool = False):
