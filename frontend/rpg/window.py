@@ -7304,8 +7304,15 @@ class ArchiveboundCanvas(QWidget):
         idle_phase = max(0.0, elapsed - 32) / 24.0
         pulse = 0.72 + 0.28 * (0.5 + 0.5 * math.sin(idle_phase))
 
+        # Do not use one loose channel-sized mask: it lets terminal bloom
+        # spill across neighboring metalwork. The compound mask is exactly the
+        # two terminal chambers, the existing tube runs, and the label well.
         clip = QPainterPath()
-        clip.addRoundedRect(channel, 10, 10)
+        clip.addEllipse(left_terminal)
+        clip.addEllipse(right_terminal)
+        clip.addRoundedRect(well, 9, 9)
+        for tube, _from_left in tubes:
+            clip.addRoundedRect(tube, 3, 3)
         painter.save()
         painter.setClipPath(clip, Qt.IntersectClip)
         painter.setCompositionMode(QPainter.CompositionMode_Screen)
