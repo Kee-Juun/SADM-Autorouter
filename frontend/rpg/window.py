@@ -7366,15 +7366,36 @@ class ArchiveboundCanvas(QWidget):
         # Once both streams meet, a centered, self-contained liquid reservoir
         # forms behind the label. Only a small internal highlight travels.
         if pool > 0.0:
-            liquid_repository = well.adjusted(4, 4, -4, -4)
+            # The repository is a beveled metal recess, not a pill-shaped
+            # label. Match that silhouette and inset it well inside the bronze
+            # rim so the liquid cannot touch or bleed over the frame.
+            liquid_repository = well.adjusted(8, 5, -8, -5)
+            bevel = min(7.0, liquid_repository.height() * 0.38)
+            repository_mask = QPainterPath()
+            repository_mask.moveTo(liquid_repository.left() + bevel, liquid_repository.top())
+            repository_mask.lineTo(liquid_repository.right() - bevel, liquid_repository.top())
+            repository_mask.lineTo(liquid_repository.right(), liquid_repository.top() + bevel)
+            repository_mask.lineTo(liquid_repository.right(), liquid_repository.bottom() - bevel)
+            repository_mask.lineTo(liquid_repository.right() - bevel, liquid_repository.bottom())
+            repository_mask.lineTo(liquid_repository.left() + bevel, liquid_repository.bottom())
+            repository_mask.lineTo(liquid_repository.left(), liquid_repository.bottom() - bevel)
+            repository_mask.lineTo(liquid_repository.left(), liquid_repository.top() + bevel)
+            repository_mask.closeSubpath()
+            liquid_level = QRectF(
+                liquid_repository.left(),
+                liquid_repository.bottom() - liquid_repository.height() * pool,
+                liquid_repository.width(),
+                liquid_repository.height() * pool,
+            )
             repository_body = QLinearGradient(
-                liquid_repository.topLeft(), liquid_repository.bottomLeft()
+                liquid_level.topLeft(), liquid_level.bottomLeft()
             )
             repository_body.setColorAt(0.0, QColor(color.red(), color.green(), color.blue(), int(118 * pool)))
             repository_body.setColorAt(0.50, QColor(color.red(), color.green(), color.blue(), int(154 * pool)))
             repository_body.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), int(104 * pool)))
-            painter.setBrush(QBrush(repository_body))
-            painter.drawRoundedRect(liquid_repository, 7, 7)
+            painter.save()
+            painter.setClipPath(repository_mask, Qt.IntersectClip)
+            painter.fillRect(liquid_level, QBrush(repository_body))
             reservoir = QRadialGradient(
                 QPointF(well.center().x() + math.sin(idle_phase) * 13, well.center().y()),
                 liquid_repository.width() * 0.46,
@@ -7382,8 +7403,8 @@ class ArchiveboundCanvas(QWidget):
             reservoir.setColorAt(0.0, QColor(247, 253, 255, int(126 * pool * pulse)))
             reservoir.setColorAt(0.34, QColor(color.red(), color.green(), color.blue(), int(74 * pool)))
             reservoir.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), 0))
-            painter.setBrush(QBrush(reservoir))
-            painter.drawRoundedRect(liquid_repository, 7, 7)
+            painter.fillRect(liquid_level, QBrush(reservoir))
+            painter.restore()
         painter.restore()
 
     def _button(self, painter, rect: QRect, text: str, color: str, small: bool = False):
