@@ -55,7 +55,8 @@ def normalize_status(status: Any) -> str:
 
 
 def is_completed_status(status: Any) -> bool:
-    return normalize_status(status) in COMPLETED_STATUSES
+    normalized = normalize_status(status)
+    return normalized in COMPLETED_STATUSES or normalized.startswith("DUPLICATE OF ")
 
 
 def mark_row_processing(row_index: int) -> None:
@@ -89,7 +90,7 @@ def mode_scope_df(df: pd.DataFrame | None, mode: str | None) -> pd.DataFrame:
 def rerun_status_for(status: Any) -> str:
     """Convert a non-terminal status into a clear rerun label."""
     normalized = normalize_status(status)
-    if normalized in COMPLETED_STATUSES:
+    if is_completed_status(normalized):
         return normalized
     if normalized.startswith(RERUN_STATUS_PREFIX):
         return normalized
@@ -142,7 +143,7 @@ def summarize_statuses_for_rows(
         }
         if normalized.startswith(RERUN_STATUS_PREFIX) and len(rerun_rows) < max_examples:
             rerun_rows.append(row_info)
-        elif normalized in COMPLETED_STATUSES and len(done_rows) < max_examples:
+        elif is_completed_status(normalized) and len(done_rows) < max_examples:
             done_rows.append(row_info)
 
     return {
@@ -175,7 +176,7 @@ def finalize_rerun_ready_statuses(
     for idx, row in target_df.iterrows():
         current_status = status_updates_buffer.get(idx, row.get("Status", ""))
         normalized = normalize_status(current_status)
-        if normalized in COMPLETED_STATUSES:
+        if is_completed_status(normalized):
             status_updates_buffer[idx] = normalized
         else:
             status_updates_buffer[idx] = rerun_status_for(current_status)
@@ -228,7 +229,7 @@ def defer_main_rows_with_failed_counsel(
             continue
 
         status = normalize_status(status_updates_buffer.get(idx, row.get("Status", "")))
-        if status in COMPLETED_STATUSES:
+        if is_completed_status(status):
             continue
 
         lni = str(row.get("LNI", "") or "").strip()
@@ -242,7 +243,7 @@ def defer_main_rows_with_failed_counsel(
     deferred_rows = []
     for idx, row in main_df.iterrows():
         existing_status = normalize_status(status_updates_buffer.get(idx, row.get("Status", "")))
-        if existing_status in COMPLETED_STATUSES:
+        if is_completed_status(existing_status):
             keep_indices.append(idx)
             continue
 

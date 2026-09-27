@@ -65,6 +65,11 @@ from .mspb_extractor import (
     parse_mspb_pdf_bytes,
 )
 
+from .irt_duplicate_verifier import (
+    build_document_profile,
+    compare_document_profiles,
+)
+
 from .itc_extractor import (
     ITCMetadata,
     extract_itc_docket_from_filename,
@@ -143,6 +148,11 @@ class CaseLawRouter:
         self.mosu00_download_dir.mkdir(parents=True, exist_ok=True)
         self._archive_duplicate_mode = False
         self._irsplr_unreadable_pdf_signatures = set()
+        # Populated only after IRT raises its own duplicate alert.  Keeping this
+        # cache per run avoids re-downloading the same candidate more than once.
+        self._duplicate_profile_cache = {}
+        self._active_duplicate_lni = None
+        self._verified_duplicate_match = None
 
     @staticmethod
     def _is_invalid_session_error(error):
@@ -2611,6 +2621,8 @@ class CaseLawRouter:
 
     def open_and_process_form(self, row, full_df, row_index, file_path, retry_count=0, dar_mode=False, wc_mode=False, mspb_mode=False, mspb_metadata=None, itc_metadata=None, irsplr_metadata=None, ohtax0_metadata=None, mnsutb_metadata=None, mework_metadata=None, mosu00_metadata=None):
         max_modify_attempts = 3
+        self._active_duplicate_lni = str(row.get("LNI", "")).strip().upper()
+        self._verified_duplicate_match = None
         # Store current tab state
         main_tab = getattr(self, '_main_tab', self.driver.current_window_handle)
         opened_tab = getattr(self, '_opened_tab', None)
@@ -2621,25 +2633,31 @@ class CaseLawRouter:
         found_modify = self.attempt_open_modify(row_index=row_index, max_attempts=1)
         
         if found_modify:
-            # Proceed with usual workflow
-            status = self.fill_irt_form(
-                row,
-                full_df,
-                row_index,
-                file_path,
-                skip_ready_check=True,
-                dar_mode=dar_mode,
-                wc_mode=wc_mode,
-                mspb_mode=mspb_mode,
-                mspb_metadata=mspb_metadata,
-                itc_metadata=itc_metadata,
-                irsplr_metadata=irsplr_metadata,
-                ohtax0_metadata=ohtax0_metadata,
-                mnsutb_metadata=mnsutb_metadata,
-                mework_metadata=mework_metadata,
-                mosu00_metadata=mosu00_metadata,
-            )
-            if status == "DONE":
+            if self._verified_duplicate_match:
+                status = self.save_verified_duplicate(row_index)
+            else:
+                # Proceed with usual workflow only when IRT did not confirm a
+                # content-verified duplicate.
+                status = self.fill_irt_form(
+                    row,
+                    full_df,
+                    row_index,
+                    file_path,
+                    skip_ready_check=True,
+                    dar_mode=dar_mode,
+                    wc_mode=wc_mode,
+                    mspb_mode=mspb_mode,
+                    mspb_metadata=mspb_metadata,
+                    itc_metadata=itc_metadata,
+                    irsplr_metadata=irsplr_metadata,
+                    ohtax0_metadata=ohtax0_metadata,
+                    mnsutb_metadata=mnsutb_metadata,
+                    mework_metadata=mework_metadata,
+                    mosu00_metadata=mosu00_metadata,
+                )
+            if status == "DONE" and self._verified_duplicate_match:
+                status = self.duplicate_status_label()
+            if status == "DONE" or str(status).upper().startswith("DUPLICATE OF "):
                 self.submit_irt_form(file_path, row_index)
                 status_updates_buffer[row_index] = status
             
@@ -2789,7 +2807,7 @@ class CaseLawRouter:
             row = df.loc[full_index]
             try:
                 row_status = str(row.get("Status", "")).strip().upper()
-                if row_status in {"DONE", "ALREADY PROCESSED"}:
+                if row_status in {"DONE", "ALREADY PROCESSED"} or row_status.startswith("DUPLICATE OF "):
                     logging.info(f"Skipping completed row {full_index + 2} with status: {row_status}.")
                     status_updates_buffer[full_index] = row_status
                     continue
@@ -3216,7 +3234,8 @@ class CaseLawRouter:
                         continue
                     # Handle duplicate document alert
                     if "duplicate document" in alert_text.lower():
-                        self.handle_duplicate_lni_popup()
+                        if not self.handle_duplicate_lni_popup():
+                            return False
                         # After handling, the form is ready for editing
                         return True
                     # Handle DSAR duplicate alert - check for additional duplicate document alert after DSAR
@@ -3233,7 +3252,8 @@ class CaseLawRouter:
                             
                             # If it's a duplicate document alert, handle it
                             if "duplicate document" in additional_alert_text.lower():
-                                self.handle_duplicate_lni_popup()
+                                if not self.handle_duplicate_lni_popup():
+                                    return False
                                 return True
                         except TimeoutException:
                             logging.info("No additional alert found after DSAR duplicate alert.")
@@ -3420,9 +3440,7 @@ class CaseLawRouter:
                     WebDriverWait(self.driver, 5).until_not(
                         EC.presence_of_element_located((By.CLASS_NAME, "ui-widget-overlay"))
                     )
-                    logging.info("Duplicate overlay cleared after handling. Proceeding to Save.")
-                    self.click_element('//*[@id="add"]')
-                    logging.info("Clicked Save button after duplicate handling.")
+                    logging.info("Duplicate overlay cleared after handling; caller will save the form.")
                     return True
                 except Exception as e:
                     logging.error(f"Error during fresh doc flow after duplicate overlay")
@@ -5425,9 +5443,184 @@ class CaseLawRouter:
             return bool(getattr(self, "_archive_duplicate_mode", False))
         return bool(archive_as_duplicate)
 
+    def _visible_duplicate_candidate_lnis(self):
+        """Return the original LNIs listed in IRT's visible duplicate dialog."""
+        pattern = re.compile(r"\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-\d{5}-\d{2}\b")
+        candidates = []
+        try:
+            dialogs = self.driver.find_elements(
+                By.XPATH,
+                "//div[contains(@class, 'ui-dialog') or @role='dialog']",
+            )
+            for dialog in dialogs:
+                if not dialog.is_displayed():
+                    continue
+                dialog_text = dialog.text or ""
+                if "duplicate" not in dialog_text.lower() and not dialog.find_elements(By.ID, "processDuplicate"):
+                    continue
+                for lni in pattern.findall(dialog_text.upper()):
+                    if lni not in candidates:
+                        candidates.append(lni)
+        except Exception as e:
+            logging.warning("Could not read LNI candidates from IRT duplicate dialog: %s", e)
+        return candidates
+
+    def _fetch_irt_pdf_in_current_browser(self, href):
+        """Fetch an IRT document through the authenticated browser session."""
+        absolute_url = urljoin(self.driver.current_url, href)
+        try:
+            result = self.driver.execute_async_script(
+                """
+                const url = arguments[0];
+                const done = arguments[arguments.length - 1];
+                fetch(url, {credentials: 'same-origin'})
+                  .then(async response => {
+                    const bytes = new Uint8Array(await response.arrayBuffer());
+                    let binary = '';
+                    const size = 0x8000;
+                    for (let offset = 0; offset < bytes.length; offset += size) {
+                      binary += String.fromCharCode(...bytes.subarray(offset, offset + size));
+                    }
+                    done({ok: response.ok, status: response.status, body: btoa(binary)});
+                  })
+                  .catch(error => done({ok: false, error: String(error)}));
+                """,
+                absolute_url,
+            )
+            if result and result.get("ok") and result.get("body"):
+                content = base64.b64decode(result["body"])
+                if self.is_pdf_bytes(content):
+                    return content
+            logging.warning(
+                "IRT document fetch did not return a PDF (status=%s) for %s.",
+                (result or {}).get("status"),
+                absolute_url,
+            )
+        except Exception as e:
+            logging.warning("Could not fetch IRT document through the active browser: %s", e)
+        return None
+
+    def _result_document_href(self):
+        """Find the File Name document link for the currently searched LNI."""
+        selectors = (
+            "#searchTable a[href*='openDocumentInBrowser']",
+            "#searchTable a[href*='OpenDocumentInBrowser']",
+            "#searchTable a[href$='.pdf']",
+            "a[href*='openDocumentInBrowser']",
+            "a[href*='OpenDocumentInBrowser']",
+        )
+        for selector in selectors:
+            try:
+                for link in self.driver.find_elements(By.CSS_SELECTOR, selector):
+                    href = link.get_attribute("href")
+                    if href:
+                        return href
+            except Exception:
+                continue
+        return None
+
+    def _document_profile_for_irt_lni(self, lni):
+        """Search an LNI in the main IRT tab and build its PDF/OCR profile."""
+        normalized_lni = str(lni or "").strip().upper()
+        if not normalized_lni:
+            return None
+        if normalized_lni in self._duplicate_profile_cache:
+            return self._duplicate_profile_cache[normalized_lni]
+
+        form_tab = self.driver.current_window_handle
+        main_tab = getattr(self, "_main_tab", None)
+        if not main_tab or main_tab not in self.driver.window_handles:
+            logging.warning("Cannot verify IRT duplicate %s because the Search Inventory tab is unavailable.", normalized_lni)
+            return None
+        try:
+            self.driver.switch_to.window(main_tab)
+            if not self.search_lni(normalized_lni):
+                return None
+            href = self._result_document_href()
+            if not href:
+                logging.warning("No document link was found while verifying duplicate LNI %s.", normalized_lni)
+                return None
+            pdf_bytes = self._fetch_irt_pdf_in_current_browser(href)
+            if not pdf_bytes:
+                return None
+            profile = build_document_profile(normalized_lni, pdf_bytes)
+            self._duplicate_profile_cache[normalized_lni] = profile
+            logging.info("Captured IRT document content for duplicate comparison: %s", normalized_lni)
+            return profile
+        except Exception as e:
+            self._raise_if_invalid_session_error(e, "capturing an IRT duplicate candidate")
+            logging.warning("Could not capture IRT duplicate candidate %s: %s", normalized_lni, e)
+            return None
+        finally:
+            if form_tab in self.driver.window_handles:
+                self.driver.switch_to.window(form_tab)
+
+    def verify_irt_duplicate_overlay(self):
+        """Confirm whether an IRT duplicate candidate is the same document.
+
+        This is deliberately invoked only after IRT itself raises a duplicate
+        alert.  A missing PDF, failed OCR, or ambiguous comparison is a false
+        positive for routing purposes and remains Process as New.
+        """
+        current_lni = str(getattr(self, "_active_duplicate_lni", "") or "").strip().upper()
+        candidate_lnis = self._visible_duplicate_candidate_lnis()
+        if not current_lni or not candidate_lnis:
+            logging.warning("IRT duplicate dialog has no usable current/candidate LNI; treating it as unconfirmed.")
+            return None
+
+        current_profile = self._document_profile_for_irt_lni(current_lni)
+        if not current_profile:
+            logging.warning("Could not read current IRT document %s; duplicate will be processed as new.", current_lni)
+            return None
+
+        for candidate_lni in candidate_lnis:
+            if candidate_lni == current_lni:
+                continue
+            candidate_profile = self._document_profile_for_irt_lni(candidate_lni)
+            if not candidate_profile:
+                continue
+            match = compare_document_profiles(current_profile, candidate_profile)
+            logging.info(
+                "IRT duplicate comparison %s vs %s: %s (%.3f)",
+                current_lni,
+                candidate_lni,
+                match.method,
+                match.similarity,
+            )
+            if match.is_match:
+                return match
+        return None
+
+    def duplicate_status_label(self):
+        match = getattr(self, "_verified_duplicate_match", None)
+        return f"DUPLICATE OF {match.original_lni}" if match else ""
+
+    def save_verified_duplicate(self, row_index):
+        """Finish the minimal Archive workflow after IRT accepted a true duplicate."""
+        match = getattr(self, "_verified_duplicate_match", None)
+        if not match:
+            return "ERROR: DUPLICATE VERIFICATION MISSING"
+        try:
+            route = self.wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="route"]')))
+            selected_route = self.get_selected_dropdown_text(route)
+            if not self.dropdown_text_matches(selected_route, "Archive"):
+                logging.error("IRT did not set Archive after confirming duplicate %s; selected route=%r", match.original_lni, selected_route)
+                return "ERROR: DUPLICATE ARCHIVE ROUTE NOT SET"
+            ready_result = self.click_ready_checkbox_and_check_overlay(False)
+            if ready_result == "READY_NOT_CLICKABLE":
+                return "ALREADY PROCESSED"
+            save_status = self.handle_routing_and_save(False, row_index, skip_route_and_ready=True)
+            if save_status == "DONE":
+                return self.duplicate_status_label()
+            return save_status
+        except Exception as e:
+            logging.error("Could not save verified duplicate %s: %s", match.original_lni, e)
+            return "ERROR: DUPLICATE SAVE FAILED"
+
     def handle_duplicate_overlay(self, archive_as_duplicate=None):
-        """Handle the duplicate dialog using the current route-specific duplicate policy."""
-        archive_as_duplicate = self.should_archive_duplicate(archive_as_duplicate)
+        """Choose Archive only after comparing IRT's current and candidate PDFs."""
+        verified_match = self.verify_irt_duplicate_overlay()
+        archive_as_duplicate = verified_match is not None
         for attempt in range(1, 4):
             self.accept_pending_alerts(initial_timeout=0.5, followup_timeout=1, max_alerts=5)
             try:
@@ -5439,6 +5632,14 @@ class CaseLawRouter:
                 self.click_duplicate_continue_button(timeout=10)
                 self.accept_pending_alerts(initial_timeout=0.5, followup_timeout=1, max_alerts=5)
                 self.wait_for_duplicate_overlay_to_clear(timeout=15)
+                if verified_match:
+                    if not self.append_comments([f"Dup of {verified_match.original_lni}"], "verified duplicate"):
+                        logging.error("Archive duplicate was selected but its required comment could not be added.")
+                        return False
+                    self._verified_duplicate_match = verified_match
+                    logging.info("Confirmed and archived duplicate of %s via %s.", verified_match.original_lni, verified_match.method)
+                else:
+                    logging.info("IRT duplicate was not confirmed by document content; continuing as a new document.")
                 return True
             except UnexpectedAlertPresentException as e:
                 logging.info(f"Duplicate alert interrupted overlay handling on attempt {attempt}; accepting it and retrying.")
@@ -5467,7 +5668,7 @@ class CaseLawRouter:
                 # If it's not a duplicate alert, return early
                 if "duplicate document" not in alert_text.lower():
                     logging.info("Alert was not a duplicate alert. Continuing...")
-                    return
+                    return True
 
             except TimeoutException:
                 logging.info("No alert found when checking for duplicate popup.")
@@ -5475,6 +5676,8 @@ class CaseLawRouter:
             # Handle overlay if present
             if not self.handle_duplicate_overlay(archive_as_duplicate=archive_as_duplicate):
                 logging.info("No duplicate overlay popup detected after alert.")
+                return False
+            return True
 
         except Exception as e:
             logging.error(f"Failed to handle Duplicate LNI popup: {e}")
@@ -5485,6 +5688,7 @@ class CaseLawRouter:
                 logging.info("Accepted fallback alert after duplicate handling error.")
             except:
                 pass
+            return False
 
     def click_duplicate_process_radio(self, timeout=10):
         process_radio = WebDriverWait(self.driver, timeout).until(
