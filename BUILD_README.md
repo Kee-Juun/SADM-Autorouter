@@ -48,7 +48,12 @@ The executable includes:
 - ✅ **Configuration files** (config.json)
 - ✅ **Application icon** (silcrow.ico)
 - ✅ **High score file** (tetris_highscore.txt)
+- ✅ **Tesseract OCR runtime and language data** (recipients do not need Tesseract installed)
 - ✅ **Version information** (file_version_info.txt)
+
+The build computer must have Tesseract installed. The build searches the standard
+Windows install folders or the optional `TESSERACT_HOME` environment variable,
+then packages `tesseract.exe`, its required DLLs, and `tessdata` into the EXE.
 
 ## Distribution
 

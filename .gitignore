@@ -19,6 +19,7 @@ env/
 build/
 dist/
 *.spec
+!smducar_pyqt.spec
 
 # Local/generated runtime data
 tmp/
