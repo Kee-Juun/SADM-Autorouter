@@ -82,7 +82,9 @@ TITLE_NEW_GAME_RECT = QRect(315, 438, 330, 110)
 # hand-estimated screen-space rectangle.
 TITLE_BUTTON_RESERVOIR_SOURCE_BOUNDS = {
     "continue": (224.0, 94.0, 440.0, 54.0),
-    "new_game": (194.0, 106.0, 382.0, 78.0),
+    # The New Game source has glass inlet lips at x=186 and x=584.  Include
+    # them so the pool visibly receives the two centerline transfer tubes.
+    "new_game": (186.0, 106.0, 398.0, 78.0),
 }
 ORDER_TURN_LIMIT = 24
 
@@ -7454,10 +7456,10 @@ class ArchiveboundCanvas(QWidget):
             # This small inset preserves the bronze lip, while the liquid now
             # reaches the actual base of the glass cavity instead of floating
             # in a label-sized band above it.
-            # The measured well already ends at the inner dark-glass border.
-            # Keep only a fractional horizontal safety inset so the liquid
-            # reads as seated against that border without touching the metal.
-            liquid_repository = well.adjusted(0.5, 2, -0.5, -2)
+            # The mapped well ends at the actual glass inlet lips.  Let the
+            # pool meet those lips directly, so it visibly receives the tube
+            # flow instead of appearing from a detached inner strip.
+            liquid_repository = well.adjusted(0, 2, 0, -2)
             bevel = min(6.0, liquid_repository.height() * 0.38)
             repository_mask = QPainterPath()
             repository_mask.moveTo(liquid_repository.left() + bevel, liquid_repository.top())
