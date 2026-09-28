@@ -7331,13 +7331,14 @@ class ArchiveboundCanvas(QWidget):
                 (QRectF(well.right(), middle_y,
                         right_middle_end - well.right(), 6), False),
             )
-        # Terminal discharge reaches the glasswork in under half a second, then
-        # settles into a five-second low-amplitude liquid circulation.
-        travel = min(1.0, elapsed / 14.0)
+        # Terminal discharge now resolves in about a quarter second: fast
+        # enough to feel immediate on hover while still showing a legible
+        # ignition and tube-to-reservoir handoff.
+        travel = min(1.0, elapsed / 7.0)
         smooth_travel = travel * travel * (3.0 - 2.0 * travel)
-        pool = max(0.0, min(1.0, (smooth_travel - 0.42) / 0.58))
+        pool = max(0.0, min(1.0, (smooth_travel - 0.28) / 0.72))
         pool = pool * pool * (3.0 - 2.0 * pool)
-        idle_phase = max(0.0, elapsed - 32) / 24.0
+        idle_phase = max(0.0, elapsed - 10) / 24.0
         pulse = 0.72 + 0.28 * (0.5 + 0.5 * math.sin(idle_phase))
 
         # Do not use one loose channel-sized mask: it lets terminal bloom
@@ -7427,9 +7428,13 @@ class ArchiveboundCanvas(QWidget):
             repository_body = QLinearGradient(
                 liquid_level.topLeft(), liquid_level.bottomLeft()
             )
-            repository_body.setColorAt(0.0, QColor(226, 253, 255, int(180 * pool)))
-            repository_body.setColorAt(0.20, QColor(color.red(), color.green(), color.blue(), int(226 * pool)))
-            repository_body.setColorAt(0.68, QColor(27, 39, 93, int(196 * pool)))
+            # Keep the liquid body full-height, but reserve the strongest
+            # luminance for its middle.  A bright top edge made the pool read
+            # as an offset strip even though the underlying cavity was full.
+            repository_body.setColorAt(0.0, QColor(18, 31, 74, int(202 * pool)))
+            repository_body.setColorAt(0.28, QColor(color.red(), color.green(), color.blue(), int(182 * pool)))
+            repository_body.setColorAt(0.52, QColor(220, 248, 255, int(214 * pool)))
+            repository_body.setColorAt(0.72, QColor(color.red(), color.green(), color.blue(), int(206 * pool)))
             repository_body.setColorAt(1.0, QColor(10, 15, 38, int(214 * pool)))
             painter.save()
             painter.setClipPath(repository_mask, Qt.IntersectClip)
@@ -7451,12 +7456,16 @@ class ArchiveboundCanvas(QWidget):
                     cover=True, focus_y=0.52,
                 )
                 painter.restore()
-            # A tight bright meniscus makes the fill level physically legible;
-            # the repository mask keeps it entirely inside the inner chamber.
+            # The high-energy liquid band belongs in the reservoir's center,
+            # not against its upper lip.  The same mask keeps it wholly inside
+            # the actual glass cavity on both button variants.
             meniscus = QRectF(
-                liquid_level.left(), liquid_level.top(), liquid_level.width(), 1.25
+                liquid_level.left(),
+                liquid_level.top() + liquid_level.height() * 0.48,
+                liquid_level.width(),
+                1.2,
             )
-            painter.fillRect(meniscus, QColor(247, 253, 255, int(190 * pool)))
+            painter.fillRect(meniscus, QColor(247, 253, 255, int(142 * pool * pulse)))
             reservoir = QRadialGradient(
                 QPointF(well.center().x() + math.sin(idle_phase) * 6, liquid_level.center().y()),
                 liquid_repository.width() * 0.34,
