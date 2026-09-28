@@ -76,6 +76,14 @@ GAME_TITLE = "OUT OF SPEC"
 GAME_CAPTION = "THE ARCHIVIST TRIALS"
 TITLE_CONTINUE_RECT = QRect(315, 330, 330, 110)
 TITLE_NEW_GAME_RECT = QRect(315, 438, 330, 110)
+# Pixel-space bounds of the dark-glass repository in the first shared-crop
+# chassis frames.  Keeping these in source coordinates lets the hover liquid
+# follow the actual art when the button is scaled, instead of relying on a
+# hand-estimated screen-space rectangle.
+TITLE_BUTTON_RESERVOIR_SOURCE_BOUNDS = {
+    "continue": (224.0, 94.0, 440.0, 54.0),
+    "new_game": (194.0, 106.0, 382.0, 78.0),
+}
 ORDER_TURN_LIMIT = 24
 
 # Primary investigation screens communicate through five-second visual
@@ -7102,6 +7110,28 @@ class ArchiveboundCanvas(QWidget):
         painter.drawPixmap(fitted, pixmap, QRectF(pixmap.rect()))
 
     @staticmethod
+    def _map_title_button_chassis_rect(
+        target: QRectF, chassis: QPixmap, source_bounds: tuple[float, float, float, float]
+    ) -> QRectF:
+        """Map a measured chassis region into its contained on-screen plate."""
+        if chassis.isNull() or chassis.width() <= 0 or chassis.height() <= 0:
+            return QRectF()
+        scale = min(target.width() / chassis.width(), target.height() / chassis.height())
+        fitted = QRectF(
+            target.center().x() - chassis.width() * scale / 2,
+            target.center().y() - chassis.height() * scale / 2,
+            chassis.width() * scale,
+            chassis.height() * scale,
+        )
+        source_x, source_y, source_width, source_height = source_bounds
+        return QRectF(
+            fitted.left() + source_x * scale,
+            fitted.top() + source_y * scale,
+            source_width * scale,
+            source_height * scale,
+        )
+
+    @staticmethod
     def _draw_pixmap_cover(
         painter: QPainter, target: QRectF, pixmap: QPixmap, focus_y: float = 0.5
     ):
@@ -7285,11 +7315,13 @@ class ArchiveboundCanvas(QWidget):
                              target.width() - 52, 36)
             left_terminal = QRectF(target.left() + 27, target.center().y() - 8, 16, 16)
             right_terminal = QRectF(target.right() - 43, target.center().y() - 8, 16, 16)
-            # Calibrated to the plate's actual dark-glass recess.  The former
-            # 22px text band sat high inside this 28px cavity, leaving the
-            # visually obvious dry strip along the bottom of the reservoir.
-            well = QRectF(target.left() + 74, target.top() + 41,
-                          target.width() - 148, 28)
+            # Mapped from the actual dark-glass repository in the chassis,
+            # including its tapered ends.  This is deliberately narrower than
+            # the bronze housing, so liquid cannot climb into either side cap.
+            well = self._map_title_button_chassis_rect(
+                target, self.title_continue_button_frames[0],
+                TITLE_BUTTON_RESERVOIR_SOURCE_BOUNDS["continue"],
+            )
             tubes = (
                 (QRectF(left_terminal.center().x(), channel.center().y() - 3,
                         well.left() - left_terminal.center().x(), 6), True),
@@ -7305,8 +7337,10 @@ class ArchiveboundCanvas(QWidget):
             right_terminal = QRectF(target.right() - 35, target.center().y() - 8, 16, 16)
             # Fill the actual dark repository interior, not merely the text's
             # bounding box. Its bronze rim remains visible around the liquid.
-            well = QRectF(target.left() + 72, target.top() + 41,
-                          target.width() - 144, 36)
+            well = self._map_title_button_chassis_rect(
+                target, self.title_new_game_button_frames[0],
+                TITLE_BUTTON_RESERVOIR_SOURCE_BOUNDS["new_game"],
+            )
             upper_y = target.top() + 25
             lower_y = target.bottom() - 28
             left_pipe_start = target.left() + 52
@@ -7407,7 +7441,7 @@ class ArchiveboundCanvas(QWidget):
             # This small inset preserves the bronze lip, while the liquid now
             # reaches the actual base of the glass cavity instead of floating
             # in a label-sized band above it.
-            liquid_repository = well.adjusted(3, 2, -3, -2)
+            liquid_repository = well.adjusted(2, 2, -2, -2)
             bevel = min(6.0, liquid_repository.height() * 0.38)
             repository_mask = QPainterPath()
             repository_mask.moveTo(liquid_repository.left() + bevel, liquid_repository.top())
