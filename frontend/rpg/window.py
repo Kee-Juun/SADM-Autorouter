@@ -7291,10 +7291,23 @@ class ArchiveboundCanvas(QWidget):
                 4.0 + min(1.60, elapsed_press * 0.40), cover=True, focus_y=0.85,
             )
             painter.restore()
-        painter.setPen(QColor("#fbf5de"))
+        label_rect = target.adjusted(82, 42, -82, -42)
+        # A real drop shadow keeps the lettering legible when the active
+        # reservoir reaches its brightest refractive phase.
+        painter.setPen(QPen(QColor(1, 4, 12, 238), 2.4))
         self._draw_fitted_text(
             painter,
-            target.adjusted(82, 42, -82, -42),
+            label_rect.translated(1.5, 2.0),
+            text,
+            13,
+            8,
+            True,
+            Qt.AlignCenter | Qt.TextSingleLine,
+        )
+        painter.setPen(QPen(QColor("#fbf5de"), 0.8))
+        self._draw_fitted_text(
+            painter,
+            label_rect,
             text,
             13,
             8,
@@ -7441,7 +7454,10 @@ class ArchiveboundCanvas(QWidget):
             # This small inset preserves the bronze lip, while the liquid now
             # reaches the actual base of the glass cavity instead of floating
             # in a label-sized band above it.
-            liquid_repository = well.adjusted(2, 2, -2, -2)
+            # The measured well already ends at the inner dark-glass border.
+            # Keep only a fractional horizontal safety inset so the liquid
+            # reads as seated against that border without touching the metal.
+            liquid_repository = well.adjusted(0.5, 2, -0.5, -2)
             bevel = min(6.0, liquid_repository.height() * 0.38)
             repository_mask = QPainterPath()
             repository_mask.moveTo(liquid_repository.left() + bevel, liquid_repository.top())
