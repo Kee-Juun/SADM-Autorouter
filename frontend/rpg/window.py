@@ -268,6 +268,21 @@ class ArchiveboundCanvas(QWidget):
         self.title_new_game_core_frames = self._uniform_grid_atlas_frames(
             self.title_new_game_core_atlas, 2, 4
         )
+        # Authored liquid surfaces are intentionally independent of the button
+        # sheets.  That lets the hover state energize the existing hardware
+        # without replacing, shifting, or repainting its bronze chassis.
+        self.title_continue_liquid_atlas = QPixmap(
+            str(ASSET_DIR / "title_button_continue_liquid_atlas_v1.png")
+        )
+        self.title_continue_liquid_frames = self._uniform_grid_atlas_frames(
+            self.title_continue_liquid_atlas, 4, 8
+        )
+        self.title_new_game_liquid_atlas = QPixmap(
+            str(ASSET_DIR / "title_button_new_game_liquid_atlas_v1.png")
+        )
+        self.title_new_game_liquid_frames = self._uniform_grid_atlas_frames(
+            self.title_new_game_liquid_atlas, 4, 8
+        )
         self.environment_sheets = {
             spec["sheet"]: QPixmap(str(ASSET_DIR / spec["sheet"]))
             for specs in ROOM_ENVIRONMENT_SPRITES.values()
@@ -7270,7 +7285,11 @@ class ArchiveboundCanvas(QWidget):
                              target.width() - 52, 36)
             left_terminal = QRectF(target.left() + 27, target.center().y() - 8, 16, 16)
             right_terminal = QRectF(target.right() - 43, target.center().y() - 8, 16, 16)
-            well = QRectF(target.center().x() - 74, channel.center().y() - 11, 148, 22)
+            # Calibrated to the plate's actual dark-glass recess.  The former
+            # 22px text band sat high inside this 28px cavity, leaving the
+            # visually obvious dry strip along the bottom of the reservoir.
+            well = QRectF(target.left() + 74, target.top() + 41,
+                          target.width() - 148, 28)
             tubes = (
                 (QRectF(left_terminal.center().x(), channel.center().y() - 3,
                         well.left() - left_terminal.center().x(), 6), True),
@@ -7286,8 +7305,8 @@ class ArchiveboundCanvas(QWidget):
             right_terminal = QRectF(target.right() - 35, target.center().y() - 8, 16, 16)
             # Fill the actual dark repository interior, not merely the text's
             # bounding box. Its bronze rim remains visible around the liquid.
-            well = QRectF(target.left() + 72, target.top() + 39,
-                          target.width() - 144, 32)
+            well = QRectF(target.left() + 72, target.top() + 41,
+                          target.width() - 144, 36)
             upper_y = target.top() + 25
             lower_y = target.bottom() - 28
             left_pipe_start = target.left() + 52
@@ -7296,7 +7315,7 @@ class ArchiveboundCanvas(QWidget):
             # These are the two centerline transfer tubes beside the
             # repository: the practical route that carries the streams from
             # the side machinery into the liquid chamber.
-            middle_y = target.center().y() - 3
+            middle_y = well.center().y() - 3
             # Begin at the inner edge of each side assembly so the liquid
             # occupies the full visible glass length, rather than stopping
             # short of the centerline transfer tubes.
@@ -7384,7 +7403,10 @@ class ArchiveboundCanvas(QWidget):
             # rim so the liquid cannot touch or bleed over the frame.
             # Leave only the actual bronze lip uncovered: this makes the
             # liquid read as a filled chamber rather than a glow behind text.
-            liquid_repository = well.adjusted(5, 4, -5, -4)
+            # This small inset preserves the bronze lip, while the liquid now
+            # reaches the actual base of the glass cavity instead of floating
+            # in a label-sized band above it.
+            liquid_repository = well.adjusted(3, 2, -3, -2)
             bevel = min(6.0, liquid_repository.height() * 0.38)
             repository_mask = QPainterPath()
             repository_mask.moveTo(liquid_repository.left() + bevel, liquid_repository.top())
@@ -7405,12 +7427,30 @@ class ArchiveboundCanvas(QWidget):
             repository_body = QLinearGradient(
                 liquid_level.topLeft(), liquid_level.bottomLeft()
             )
-            repository_body.setColorAt(0.0, QColor(color.red(), color.green(), color.blue(), int(170 * pool)))
-            repository_body.setColorAt(0.50, QColor(color.red(), color.green(), color.blue(), int(210 * pool)))
-            repository_body.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), int(158 * pool)))
+            repository_body.setColorAt(0.0, QColor(226, 253, 255, int(180 * pool)))
+            repository_body.setColorAt(0.20, QColor(color.red(), color.green(), color.blue(), int(226 * pool)))
+            repository_body.setColorAt(0.68, QColor(27, 39, 93, int(196 * pool)))
+            repository_body.setColorAt(1.0, QColor(10, 15, 38, int(214 * pool)))
             painter.save()
             painter.setClipPath(repository_mask, Qt.IntersectClip)
             painter.fillRect(liquid_level, QBrush(repository_body))
+            liquid_frames = (
+                self.title_continue_liquid_frames
+                if button_id == "continue"
+                else self.title_new_game_liquid_frames
+            )
+            if liquid_frames:
+                # Thirty-two authored/in-between surface frames give the
+                # reservoir a slow refractive circulation.  They are clipped
+                # before drawing, so neither the saturated core nor its subtle
+                # luminance can escape through the beveled metal rim.
+                painter.save()
+                painter.setOpacity(0.58 + 0.10 * pulse)
+                self._draw_blended_title_frames(
+                    painter, liquid_level, liquid_frames, elapsed / 4.5,
+                    cover=True, focus_y=0.52,
+                )
+                painter.restore()
             # A tight bright meniscus makes the fill level physically legible;
             # the repository mask keeps it entirely inside the inner chamber.
             meniscus = QRectF(
@@ -7418,11 +7458,12 @@ class ArchiveboundCanvas(QWidget):
             )
             painter.fillRect(meniscus, QColor(247, 253, 255, int(190 * pool)))
             reservoir = QRadialGradient(
-                QPointF(well.center().x() + math.sin(idle_phase) * 13, well.center().y()),
-                liquid_repository.width() * 0.46,
+                QPointF(well.center().x() + math.sin(idle_phase) * 6, liquid_level.center().y()),
+                liquid_repository.width() * 0.34,
             )
-            reservoir.setColorAt(0.0, QColor(247, 253, 255, int(150 * pool * pulse)))
-            reservoir.setColorAt(0.34, QColor(color.red(), color.green(), color.blue(), int(108 * pool)))
+            reservoir.setColorAt(0.0, QColor(248, 253, 255, int(118 * pool * pulse)))
+            reservoir.setColorAt(0.24, QColor(color.red(), color.green(), color.blue(), int(96 * pool)))
+            reservoir.setColorAt(0.58, QColor(99, 70, 188, int(48 * pool)))
             reservoir.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), 0))
             painter.fillRect(liquid_level, QBrush(reservoir))
             painter.restore()
