@@ -3557,7 +3557,16 @@ class CaseLawRouter:
                     if is_counsel_file:
                         self.handle_counsel_fields(row, dar_mode, wc_mode)
                     else:
-                        self.handle_main_opinion_fields(row, full_df, row_index, file_path, dar_mode, wc_mode)
+                        # Main-opinion preparation may decline routing when its
+                        # required counsel LNI cannot be attached.  That is a
+                        # terminal row outcome, not an interactability retry;
+                        # continuing here after the form has been abandoned
+                        # previously caused the invalid-session cascade.
+                        main_status = self.handle_main_opinion_fields(
+                            row, full_df, row_index, file_path, dar_mode, wc_mode
+                        )
+                        if main_status:
+                            return main_status
 
                     self.handle_any_alert()
 
@@ -4394,7 +4403,14 @@ class CaseLawRouter:
             logging.error(f"Error handling MOSU00 table fields: {e}")
             return False
 
-    def configure_mosu00_table_case(self, mosu00_metadata: MOSU00Metadata):
+    def configure_mosu00_table_case(self, mosu00_metadata: MOSU00Metadata, _save_recovery=False):
+        """Populate and save the MOSU00 child-docket dialog.
+
+        Some IRT versions close the modal when focus is tabbed away from the
+        final child-docket field.  The final field is therefore committed with
+        blur/change events instead of TAB.  If an older IRT build still closes
+        the modal, reopen it once and rebuild the unsaved child-docket list.
+        """
         child_dockets = [str(docket).strip() for docket in (mosu00_metadata.child_dockets or ()) if str(docket).strip()]
         if not child_dockets:
             logging.error("MOSU00 table metadata does not contain child docket numbers.")
@@ -4439,8 +4455,32 @@ class CaseLawRouter:
                 field.clear()
                 field.send_keys(docket)
                 logging.info("Filled MOSU00 child docket %d/%d: %s", index + 1, len(child_dockets), docket)
-                field.send_keys(Keys.TAB)
+                if index < len(child_dockets) - 1:
+                    field.send_keys(Keys.TAB)
+                else:
+                    # Tabbing away from the last input has been observed to
+                    # dismiss the entire dialog before its Save button can be
+                    # reached.  Commit the value without moving focus outside
+                    # the dialog instead.
+                    self.driver.execute_script(
+                        """
+                        arguments[0].dispatchEvent(new Event('change', {bubbles: true}));
+                        arguments[0].dispatchEvent(new Event('blur', {bubbles: true}));
+                        arguments[0].blur();
+                        """,
+                        field,
+                    )
+                    logging.info("Committed final MOSU00 child docket without tabbing out of the dialog.")
                 self.wait_for_mosu00_table_case_spinner(timeout=20)
+
+            if not self.is_mosu00_table_case_form_visible():
+                if not _save_recovery:
+                    logging.warning(
+                        "MOSU00 Table Case Entry dialog disappeared before Save; reopening it once and rebuilding the child docket list."
+                    )
+                    return self.configure_mosu00_table_case(mosu00_metadata, _save_recovery=True)
+                logging.error("MOSU00 Table Case Entry dialog disappeared again before Save; stopping safely.")
+                return False
 
             if not self.click_mosu00_table_case_save_button():
                 return False
@@ -4504,6 +4544,34 @@ class CaseLawRouter:
         WebDriverWait(self.driver, 20).until(EC.presence_of_element_located((By.XPATH, header_xpath)))
         logging.info("MOSU00 Table Case Entry form is visible.")
 
+    def is_mosu00_table_case_form_visible(self):
+        """Return whether the active MOSU00 table-case modal is still visible."""
+        try:
+            return bool(self.driver.execute_script(
+                """
+                const visible = (element) => {
+                    if (!element) return false;
+                    const style = window.getComputedStyle(element);
+                    const rect = element.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden'
+                        && style.opacity !== '0' && rect.width > 0 && rect.height > 0;
+                };
+                const tableInputVisible = Array.from(document.querySelectorAll(
+                    '#tableCaseNums, [id^="tcDocketNum"]'
+                )).some(visible);
+                if (tableInputVisible) return true;
+                return Array.from(document.querySelectorAll('.ui-dialog, [role="dialog"]')).some((dialog) => {
+                    if (!visible(dialog)) return false;
+                    const text = (dialog.innerText || dialog.textContent || '').toLowerCase();
+                    return text.includes('choose number of child lnis')
+                        || Boolean(dialog.querySelector('#tableCaseNums, [id^="tcDocketNum"]'));
+                });
+                """
+            ))
+        except Exception as exc:
+            logging.info("Could not verify MOSU00 Table Case Entry dialog visibility: %s", exc)
+            return False
+
     def wait_for_mosu00_table_case_spinner(self, timeout=15):
         try:
             WebDriverWait(self.driver, timeout).until(
@@ -4539,6 +4607,9 @@ class CaseLawRouter:
     def click_mosu00_table_case_save_button(self):
         self.clear_mosu00_duplicate_dialog_before_table_save()
         self.wait_for_mosu00_table_case_spinner(timeout=8)
+        if not self.is_mosu00_table_case_form_visible():
+            logging.error("MOSU00 Table Case Entry dialog is not visible before Save; not attempting an unrelated page click.")
+            return False
         if self.click_mosu00_table_save_with_dom_fallback():
             return True
 
@@ -6286,8 +6357,9 @@ class CaseLawRouter:
                 current_status = "Missing Counsel Information"
                 if row_index is not None:
                     status_updates_buffer[row_index] = current_status
-            self.driver.close()
-            self.driver.switch_to.window(self.driver.window_handles[0])
+            # The caller owns IRT-tab cleanup.  Closing it here and then
+            # continuing the caller's form checks creates an invalid browser
+            # session/no-such-window cascade.
             return current_status
 
         # Check if both Comments and Route are not interactable
@@ -6298,15 +6370,11 @@ class CaseLawRouter:
             if not comments_field.is_enabled() and not route_element.is_enabled():
                 logging.error("Both Comments and Route dropdown are non-interactable. Skipping Main Opinion.")
                 status_updates_buffer[row_index] = "Non-interactable IRT Form"
-                self.driver.close()
-                self.driver.switch_to.window(self.driver.window_handles[0])
                 return "Non-interactable IRT Form"
 
         except Exception as e:
-            logging.error(f"Error checking Comments/Route interactability")
+            logging.error(f"Error checking Comments/Route interactability: {e}")
             status_updates_buffer[row_index] = "Non-interactable IRT Form"
-            self.driver.close()
-            self.driver.switch_to.window(self.driver.window_handles[0])
             return "Non-interactable IRT Form"
 
 
@@ -6382,31 +6450,40 @@ class CaseLawRouter:
                     continue
 
                 success = False
-                try:
-                    if not self.clear_and_fill_input('//*[@id="relateLNIs"]', lni):
-                        if row_index is not None:
-                            status_updates_buffer[row_index] = "RELATED LNI FIELD LOCKED"
-                        logging.warning(f"Related LNI input was not interactable for {lni}.")
-                        return False
-                    self.wait.until(EC.element_to_be_clickable((By.XPATH, '//*[@id="AddRelated"]'))).click()
-                    # Wait up to 5 minutes for the LNI to appear in the list box
-                    def lni_in_listbox(driver):
-                        related_lni_box = driver.find_element(By.XPATH, '//*[@id="relatedLni"]')
-                        updated_lnis = [x.strip() for x in related_lni_box.text.split('\n') if x.strip()]
-                        return lni in updated_lnis
-                    self.long_wait.until(lni_in_listbox)
-                    logging.info(f"Related Counsel LNI {lni} added successfully.")
-                    attached_any = True
-                    success = True
-                except Exception as e:
-                    if "already exists" in str(e).lower():
-                        logging.warning(f"Related Counsel LNI {lni} already attached. Skipping.")
-                        logging.info(f"{lni} already exists according to alert. Skipping further attempts.")
+                for attempt in range(1, 3):
+                    try:
+                        if not self.clear_and_fill_input('//*[@id="relateLNIs"]', lni):
+                            if row_index is not None:
+                                status_updates_buffer[row_index] = "RELATED LNI FIELD LOCKED"
+                            logging.warning(f"Related LNI input was not interactable for {lni}.")
+                            return False
+
+                        self.click_add_related_lni_button(lni)
+
+                        # Wait up to 5 minutes for the LNI to appear in the list box.
+                        def lni_in_listbox(driver):
+                            related_lni_box = driver.find_element(By.XPATH, '//*[@id="relatedLni"]')
+                            updated_lnis = [x.strip() for x in related_lni_box.text.split('\n') if x.strip()]
+                            return lni in updated_lnis
+
+                        self.long_wait.until(lni_in_listbox)
+                        logging.info(f"Related Counsel LNI {lni} added successfully.")
+                        attached_any = True
                         success = True
-                    else:
-                        logging.error(f"Failed to add LNI {lni}")
-                        if 'TimeoutException' in str(type(e)) or 'timeout' in str(e).lower():
-                            # Get docket number for message
+                        break
+                    except Exception as e:
+                        if "already exists" in str(e).lower():
+                            logging.warning(f"Related Counsel LNI {lni} already attached. Skipping.")
+                            logging.info(f"{lni} already exists according to alert. Skipping further attempts.")
+                            success = True
+                            break
+
+                        is_timeout = isinstance(e, TimeoutException) or "timeout" in str(e).lower()
+                        logging.warning(
+                            "Failed to add Related Counsel LNI %s on attempt %d/2: %s",
+                            lni, attempt, e,
+                        )
+                        if is_timeout:
                             docket_number = CaseLawRouter.format_docket_number(None, row["FileName"], dar_mode, wc_mode) if "FileName" in row else "?"
                             msg = f"Oops! Related Counsel LNI {lni} for Docket Number {docket_number} did not attach after 5 minutes. Skipping this Main Opinion. Retry again later."
                             logging.warning(msg)
@@ -6414,9 +6491,14 @@ class CaseLawRouter:
                                 self.show_error(msg)
                             if row_index is not None:
                                 status_updates_buffer[row_index] = "RELATED LNI TIMEOUT"
-                            return False  # Skip this main opinion
+                            return False
+                        if attempt == 1:
+                            time.sleep(0.75)
+                        elif row_index is not None:
+                            status_updates_buffer[row_index] = "RELATED LNI ATTACH FAILED"
                 if not success:
-                    logging.warning(f"Failed to attach LNI {lni} after waiting up to 5 minutes.")
+                    logging.error(f"Failed to attach LNI {lni} after two click attempts.")
+                    return False
 
             # After all attempts, update status if nothing was attached
             # Re-read the list box to check if any of the related LNIs are present
@@ -6430,11 +6512,37 @@ class CaseLawRouter:
                 return False  # Return False to indicate failure
 
         except Exception as e:
-            logging.error(f"Error handling related LNIs")
+            logging.exception(f"Error handling related LNIs for docket {main_docket if 'main_docket' in locals() else '?'}: {e}")
             if row_index is not None:
                 status_updates_buffer[row_index] = "RELATED LNI ERROR"
             return False  # Return False to indicate failure
         return True  # Return True if at least one LNI was attached
+
+    def click_add_related_lni_button(self, lni):
+        """Click Add Related using browser-safe fallbacks and retain the failure reason."""
+        button = WebDriverWait(self.driver, 10).until(
+            EC.presence_of_element_located((By.XPATH, '//*[@id="AddRelated"]'))
+        )
+        self.driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center', inline: 'center'});", button
+        )
+        if not button.is_enabled():
+            raise RuntimeError(f"Add Related button was disabled for {lni}")
+
+        failures = []
+        for method_name, click_method in (
+            ("native", lambda: button.click()),
+            ("action", lambda: ActionChains(self.driver).move_to_element(button).pause(0.15).click().perform()),
+            ("javascript", lambda: self.driver.execute_script("arguments[0].click();", button)),
+        ):
+            try:
+                click_method()
+                logging.info("Clicked Add Related for %s using %s click.", lni, method_name)
+                return
+            except Exception as exc:
+                failures.append(f"{method_name}: {exc}")
+
+        raise RuntimeError(f"Could not click Add Related for {lni} ({'; '.join(failures)})")
 
     def extract_decision_date_from_filename(self, file_name):
         """
