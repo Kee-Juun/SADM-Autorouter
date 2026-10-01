@@ -152,10 +152,19 @@ def parse_mosu00_html_text(raw_html_or_text: str | bytes, filename_hint: str | N
         )
         return None
 
+    parent_docket = dockets[0]
+    child_dockets = tuple(docket for docket in dockets[1:] if docket != parent_docket)
+    if not child_dockets:
+        logging.debug("MOSU00 table metadata contains no non-parent child dockets: %s", dockets)
+        return None
+
     return MOSU00Metadata(
-        docket_number=dockets[0],
+        docket_number=parent_docket,
         decision_date=decision_date,
-        child_dockets=tuple(dockets),
+        # The first docket identifies the minutes document's main opinion.
+        # IRT's table overlay accepts only its other/child dockets; including
+        # the parent creates a duplicate conflict with the form's main docket.
+        child_dockets=child_dockets,
         title_hint=extract_mosu00_title_hint(text, filename_hint=filename_hint),
     )
 

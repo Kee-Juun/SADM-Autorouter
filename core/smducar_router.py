@@ -443,7 +443,7 @@ class CaseLawRouter:
             mspb_metadata_buffer[row_index]["Metadata Type"] = "MOSU00"
             if metadata:
                 child_dockets = getattr(metadata, "child_dockets", ()) or ()
-                mspb_metadata_buffer[row_index]["Extracted Other Numbers"] = "; ".join(child_dockets[1:])
+                mspb_metadata_buffer[row_index]["Extracted Other Numbers"] = "; ".join(child_dockets)
                 mspb_metadata_buffer[row_index]["Prepared Comments"] = getattr(metadata, "comments_text", "") or ""
 
     def mark_itc_duplicate_status(self, row_index, row, lni, metadata: ITCMetadata):
@@ -3499,40 +3499,42 @@ class CaseLawRouter:
             if mosu00_metadata:
                 return self.fill_mosu00_table_irt_form(row, row_index, mosu00_metadata)
             
-            # Determine decision date with clear precedence:
-            # 1) Explicit Decision Date from Mapping Data sheet (column K) - HIGHEST PRIORITY
-            # 2) Date inferred from filename / Main opinion date (only if no manual decision date)
-            # 3) Date derived from Received Date field - FINAL FALLBACK
+            # A matched main opinion is the decision-date authority for a
+            # counsel record.  Counsel is intentionally processed first, but
+            # must carry the date that will later be used by its main opinion.
             manual_decision_raw = row.get("Decision Date")
             decision_date = None
 
-            # 1) Manual Decision Date from mapping sheet (prime source)
-            if manual_decision_raw is not None and str(manual_decision_raw).strip().lower() != "nan":
-                try:
-                    if isinstance(manual_decision_raw, (datetime.date, datetime.datetime)):
-                        decision_date = manual_decision_raw.strftime("%m-%d-%Y")
-                    else:
-                        decision_date = str(manual_decision_raw).strip()
-                    logging.info(f"Using manual Decision Date from mapping sheet: {decision_date}")
-                except Exception as e:
-                    logging.error(f"Error normalizing manual Decision Date '{manual_decision_raw}': {e}")
+            if is_counsel_file:
+                counsel_docket = CaseLawRouter.format_docket_number(None, file_name, dar_mode, wc_mode)
+                if counsel_docket:
+                    decision_date = self.find_main_opinion_date_for_counsel(
+                        counsel_docket,
+                        file_name,
+                        dar_mode,
+                        wc_mode,
+                        full_df=full_df,
+                    )
+                    if decision_date:
+                        logging.info(
+                            "Using matched Main Opinion decision date for counsel: %s",
+                            decision_date,
+                        )
 
-            # 2) Try filename extraction / Main opinion date (only if no manual decision date)
-            if not decision_date and (manual_decision_raw is None or str(manual_decision_raw).strip().lower() == "nan" or str(manual_decision_raw).strip() == ""):
+            # A row-level mapping date remains authoritative only when there
+            # is no matching main opinion (or the row itself is the main).
+            if not decision_date:
+                decision_date = self.normalize_mapping_decision_date(manual_decision_raw)
+                if decision_date:
+                    logging.info(f"Using manual Decision Date from mapping sheet: {decision_date}")
+
+            # Next use the relevant filename.  The main-opinion lookup above
+            # already ran for counsel, so this is only its local fallback.
+            if not decision_date:
                 special_decision_date = None
                 if is_counsel_file:
-                    # For counsel files, try to get date from matching main opinion filename first
-                    counsel_docket = CaseLawRouter.format_docket_number(None, file_name, dar_mode, wc_mode)
-                    if counsel_docket:
-                        special_decision_date = self.find_main_opinion_date_for_counsel(counsel_docket, file_name, dar_mode, wc_mode)
-                        if special_decision_date:
-                            logging.info(f"Using Main Opinion date for counsel: {special_decision_date}")
-                    
-                    # If no main opinion date found, try extracting from counsel filename itself
-                    if not special_decision_date:
-                        special_decision_date = self.extract_decision_date_from_filename(file_name)
+                    special_decision_date = self.extract_decision_date_from_filename(file_name)
                 else:
-                    # For main opinion files, extract date from its own filename
                     special_decision_date = self.extract_decision_date_from_filename(file_name)
                 
                 if special_decision_date:
@@ -6241,18 +6243,33 @@ class CaseLawRouter:
             logging.error(f"Error finding Main Opinion LNI for counsel")
             return None
 
-    def find_main_opinion_date_for_counsel(self, counsel_docket, counsel_file_name, dar_mode=False, wc_mode=False):
-        """Find the Main Opinion decision date for a counsel document by matching docket numbers"""
+    @staticmethod
+    def normalize_mapping_decision_date(value):
+        """Normalize Mapping Data decision dates without inventing a fallback."""
+        if value is None or str(value).strip().lower() in {"", "nan", "nat", "none"}:
+            return None
+        if isinstance(value, (datetime.date, datetime.datetime)):
+            return value.strftime("%m-%d-%Y")
+        return str(value).strip()
+
+    def find_main_opinion_date_for_counsel(self, counsel_docket, counsel_file_name, dar_mode=False, wc_mode=False, full_df=None):
+        """Find the matched main opinion's mapping/filename date for a counsel document."""
         try:
-            # Get the full dataframe from the class instance
-            if hasattr(self, 'full_df') and self.full_df is not None:
-                # Look for main opinion rows with matching docket
-                for _, row in self.full_df.iterrows():
+            dataframe = full_df if full_df is not None else getattr(self, "full_df", None)
+            if dataframe is not None:
+                for _, row in dataframe.iterrows():
                     main_file_name = str(row.get("FileName", "")).strip()
                     if not is_counsel(main_file_name, dar_mode, wc_mode):
                         main_docket = CaseLawRouter.format_docket_number(None, main_file_name, dar_mode, wc_mode)
                         if main_docket and main_docket == counsel_docket:
-                            # Extract date from main opinion filename
+                            mapped_date = self.normalize_mapping_decision_date(row.get("Decision Date"))
+                            if mapped_date:
+                                logging.info(
+                                    "Found Main Opinion mapping decision date %s for counsel docket %s",
+                                    mapped_date,
+                                    counsel_docket,
+                                )
+                                return mapped_date
                             main_date = self.extract_decision_date_from_filename(main_file_name)
                             if main_date:
                                 logging.info(f"Found Main Opinion date {main_date} for counsel docket {counsel_docket}")
@@ -6349,6 +6366,9 @@ class CaseLawRouter:
         # ✅ Now click the Related checkbox AFTER Source Detail
         try:
             self.click_element('//*[@id="related"]', wait_time=0)
+            # Selecting Related can itself raise IRT's duplicate alert.  Clear
+            # it before querying or filling the related-LNI controls.
+            self.handle_any_alert(timeout=3)
         except Exception as e:
             logging.error(f"Error ticking 'related' checkbox")
 

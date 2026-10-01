@@ -30,6 +30,7 @@ class IRTFormRecoveryTests(unittest.TestCase):
         router.wait = Mock()
         router.wait.until.side_effect = Exception("case name intentionally unavailable")
         router.click_element = Mock()
+        router.handle_any_alert = Mock()
         router.handle_related_ln_is = Mock(return_value=False)
         router.driver = Mock()
         row = {"FileName": "MOSU00_123.pdf", "LNI": "6KMY-TEST"}
