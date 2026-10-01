@@ -4615,6 +4615,11 @@ class CaseLawRouter:
 
         uppercase = "'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'"
         save_xpaths = [
+            # Current IRT MOSU00 table-case dialog.  This control is rendered
+            # outside the dialog body, so the DOM-context fallback cannot see
+            # it when the dialog itself has no visible button pane.
+            "/html/body/div[17]/div[3]/div/button[1]/span",
+            "/html/body/div[17]/div[3]/div/button[1]",
             (
                 "//div[contains(@class, 'ui-dialog') and .//*[contains(normalize-space(.), 'Choose Number of Child LNIs')]]"
                 f"//button[.//span[translate(normalize-space(.), {uppercase})='SAVE'] or translate(normalize-space(.), {uppercase})='SAVE']"
