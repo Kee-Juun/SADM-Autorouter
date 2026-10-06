@@ -153,6 +153,10 @@ class CaseLawRouter:
         self._duplicate_profile_cache = {}
         self._active_duplicate_lni = None
         self._verified_duplicate_match = None
+        # SADM and DARA counsel commonly resemble their main opinions closely
+        # enough to produce routine IRT duplicate alerts.  Their run setup
+        # turns content verification off, but specialized modes retain it.
+        self._irt_duplicate_verification_enabled = True
 
     @staticmethod
     def _is_invalid_session_error(error):
@@ -5211,6 +5215,15 @@ class CaseLawRouter:
         counsel_df, main_df = None, None
         try:
             self.full_df = full_df
+            self.configure_irt_duplicate_verification(
+                mspb_mode=mspb_mode,
+                itc_mode=itc_mode,
+                irsplr_mode=irsplr_mode,
+                ohtax0_mode=ohtax0_mode,
+                mnsutb_mode=mnsutb_mode,
+                mework_mode=mework_mode,
+                mosu00_mode=mosu00_mode,
+            )
 
             counsel_df, main_df = filter_mapping_data(full_df, dar_mode, wc_mode, mspb_mode=mspb_mode)
 
@@ -5516,6 +5529,36 @@ class CaseLawRouter:
             return "This is a duplicate document"
         return "ALERT_HANDLED" if handled_alert else None
 
+    def configure_irt_duplicate_verification(
+        self,
+        *,
+        mspb_mode=False,
+        itc_mode=False,
+        irsplr_mode=False,
+        ohtax0_mode=False,
+        mnsutb_mode=False,
+        mework_mode=False,
+        mosu00_mode=False,
+    ):
+        """Set duplicate-content verification policy for the active router mode.
+
+        SADM and DARA only clear IRT's duplicate UI and continue as new.  This
+        avoids investigating the expected counsel/main-opinion alerts.  The
+        specialized routers retain their content-verification safeguards.
+        """
+        self._irt_duplicate_verification_enabled = any((
+            mspb_mode,
+            itc_mode,
+            irsplr_mode,
+            ohtax0_mode,
+            mnsutb_mode,
+            mework_mode,
+            mosu00_mode,
+        ))
+        policy = "content verification enabled" if self._irt_duplicate_verification_enabled else "process-as-new only"
+        logging.info("IRT duplicate policy for this run: %s", policy)
+        return self._irt_duplicate_verification_enabled
+
     def should_archive_duplicate(self, archive_as_duplicate=None):
         if archive_as_duplicate is None:
             return bool(getattr(self, "_archive_duplicate_mode", False))
@@ -5697,7 +5740,13 @@ class CaseLawRouter:
 
     def handle_duplicate_overlay(self, archive_as_duplicate=None):
         """Choose Archive only after comparing IRT's current and candidate PDFs."""
-        verified_match = self.verify_irt_duplicate_overlay()
+        if getattr(self, "_irt_duplicate_verification_enabled", True):
+            verified_match = self.verify_irt_duplicate_overlay()
+        else:
+            verified_match = None
+            logging.info(
+                "IRT duplicate content verification is disabled for this SADM/DARA run; processing the alert as a new document."
+            )
         archive_as_duplicate = verified_match is not None
         for attempt in range(1, 4):
             self.accept_pending_alerts(initial_timeout=0.5, followup_timeout=1, max_alerts=5)

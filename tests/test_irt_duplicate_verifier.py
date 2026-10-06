@@ -1,10 +1,12 @@
 import unittest
+from unittest.mock import Mock
 
 from core.irt_duplicate_verifier import (
     IRTDocumentProfile,
     compare_document_profiles,
     normalize_document_text,
 )
+from core.smducar_router import CaseLawRouter
 
 
 class IRTDuplicateVerifierTests(unittest.TestCase):
@@ -51,6 +53,33 @@ class IRTDuplicateVerifierTests(unittest.TestCase):
         )
         self.assertTrue(result.is_match)
         self.assertGreaterEqual(result.similarity, 0.995)
+
+    def test_sadm_and_dara_disable_content_verification(self):
+        router = CaseLawRouter.__new__(CaseLawRouter)
+
+        self.assertFalse(router.configure_irt_duplicate_verification())
+        self.assertFalse(router.configure_irt_duplicate_verification())
+
+    def test_specialized_router_modes_keep_content_verification(self):
+        router = CaseLawRouter.__new__(CaseLawRouter)
+
+        self.assertTrue(router.configure_irt_duplicate_verification(mspb_mode=True))
+        self.assertTrue(router.configure_irt_duplicate_verification(itc_mode=True))
+        self.assertTrue(router.configure_irt_duplicate_verification(mosu00_mode=True))
+
+    def test_sadm_duplicate_alert_processes_as_new_without_pdf_comparison(self):
+        router = CaseLawRouter.__new__(CaseLawRouter)
+        router._irt_duplicate_verification_enabled = False
+        router.verify_irt_duplicate_overlay = Mock(side_effect=AssertionError("must not compare PDFs"))
+        router.accept_pending_alerts = Mock(return_value=(False, False))
+        router.click_duplicate_process_radio = Mock()
+        router.click_duplicate_continue_button = Mock()
+        router.wait_for_duplicate_overlay_to_clear = Mock()
+
+        self.assertTrue(router.handle_duplicate_overlay())
+        router.verify_irt_duplicate_overlay.assert_not_called()
+        router.click_duplicate_process_radio.assert_called_once()
+        router.click_duplicate_continue_button.assert_called_once()
 
 
 if __name__ == "__main__":
