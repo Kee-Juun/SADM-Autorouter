@@ -1,7 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
+import sys
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+sys.path.insert(0, str(Path(SPECPATH)))
+from core.build_info import write_build_manifest
 
 # IMPORTANT: Python 3.13 has a known compatibility issue with PyInstaller
 # If you encounter "AttributeError: class must define a '_type_' attribute",
@@ -9,7 +12,8 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 # The build_exe.bat script uses Python 3.12 to avoid this issue.
 
 # Collect data files (assets, config, etc.)
-datas = []
+build_manifest = write_build_manifest(Path(workpath) / 'build_metadata')
+datas = [(str(build_manifest), '.')]
 if os.path.exists('assets'):
     datas.append(('assets', 'assets'))
 if os.path.exists('config'):
@@ -67,6 +71,9 @@ a = Analysis(
         'pyqt_widgets',  # PyQt custom widgets
         'pyqt_dialogs',  # PyQt dialog classes
         'pypdf',  # MSPB PDF text extraction
+        'fitz',  # OCR rendering and independent PLR integrity checks
+        'docx',  # FERC DOCX metadata extraction
+        *collect_submodules('docx'),  # python-docx loads OOXML helpers beneath the package
         'pdf2image',  # Optional MSPB OCR fallback
         'pytesseract',  # Optional MSPB OCR fallback
     ],

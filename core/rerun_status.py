@@ -18,15 +18,20 @@ from .smducar_excel import flush_status_updates
 from .smducar_filetypes import get_related_counsel_lnis, is_counsel
 from .smducar_utils import extract_docket_number
 from .itc_extractor import is_itc_row
-from .irsplr_extractor import is_irsplr_row
+from .irsplr_extractor import is_irsplr_court_code, is_irsplr_row
 from .ohtax0_extractor import is_ohtax0_row
 from .mnsutb_extractor import is_mnsutb_row
 from .mework_extractor import is_mework_row
 from .mosu00_extractor import is_mosu00_row, is_mosu00_table_filename
+from .fcc_extractor import is_fcc_row
+from .ferc_extractor import is_ferc_row
+from .nlrb_extractor import is_nlrb_row
 
 
 STATUS_DONE = "DONE"
 STATUS_ALREADY_PROCESSED = "ALREADY PROCESSED"
+STATUS_DECISION_DATE_UPDATED = "DECISION DATE UPDATED"
+STATUS_DATE_UPDATE_UNCONFIRMED = "NEEDS RERUN - DECISION DATE UPDATE UNCONFIRMED"
 STATUS_PROCESSING = "PROCESSING"
 
 STATUS_NEEDS_RERUN_SEARCH_FAILED = "NEEDS RERUN - SEARCH FAILED"
@@ -35,7 +40,16 @@ STATUS_NEEDS_RERUN_NOT_ATTEMPTED = "NEEDS RERUN - NOT ATTEMPTED"
 STATUS_NEEDS_RERUN_FAILED = "NEEDS RERUN - FAILED"
 STATUS_NEEDS_RERUN_COUNSEL_FAILED = "NEEDS RERUN - COUNSEL FAILED"
 
-COMPLETED_STATUSES = {STATUS_DONE, STATUS_ALREADY_PROCESSED}
+# Review outcomes are intentional stops, not failed router work.  They must
+# stay visible in the mapping sheet and must never be auto-converted to a
+# rerun status during workflow cleanup.
+MANUAL_REVIEW_STATUSES = {
+    "NEEDS REVIEW",
+    "ERRATA FOR REVIEW",
+    "ERRATA ATTACHMENT FOR REVIEW",
+    "ATTACHMENT FOR REVIEW",
+}
+COMPLETED_STATUSES = {STATUS_DONE, STATUS_ALREADY_PROCESSED, STATUS_DECISION_DATE_UPDATED, *MANUAL_REVIEW_STATUSES}
 RERUN_STATUS_PREFIX = "NEEDS RERUN"
 
 
@@ -56,7 +70,71 @@ def normalize_status(status: Any) -> str:
 
 def is_completed_status(status: Any) -> bool:
     normalized = normalize_status(status)
-    return normalized in COMPLETED_STATUSES or normalized.startswith("DUPLICATE OF ")
+    return (
+        normalized in COMPLETED_STATUSES
+        or is_manual_review_status(normalized)
+        or normalized.startswith("DUPLICATE OF ")
+    )
+
+
+def is_manual_review_status(status: Any) -> bool:
+    """Return whether a status is an intentional, human-review stop."""
+    normalized = normalize_status(status)
+    # Older Ready-lock handling inspected the page while duplicate alerts
+    # were still transitioning and incorrectly made these stops terminal.
+    # Retry only that specific unconfirmed-state outcome, preserving real
+    # saved-field mismatches and other human-review flags.
+    if normalized.startswith("MANUAL REVIEW REQUIRED - READY TO PROCESS LOCKED:") and (
+        "SAVED READY TO PROCESS STATE COULD NOT BE CONFIRMED" in normalized
+        or "SAVED ROUTING DETAILS UNAVAILABLE" in normalized
+    ):
+        return False
+    return normalized in MANUAL_REVIEW_STATUSES or normalized.startswith("MANUAL REVIEW REQUIRED")
+
+
+def should_recheck_irsplr_comment_review(row, status=None) -> bool:
+    """Reverify PLR's old generated-comment-only flags under the new policy.
+
+    Do not simply relabel them successful: reopen and confirm the saved
+    Excluded/Archive/Ready state. Other review reasons/courts and explicit
+    user-supplied comment requirements remain intentional review stops.
+    """
+    court = row.get("CourtCode", row.get("Court Code", ""))
+    if not is_irsplr_court_code(court) or normalize_status(row.get("Comments", "")):
+        return False
+    return normalize_status(row.get("Status", "") if status is None else status) == (
+        "MANUAL REVIEW REQUIRED - READY TO PROCESS LOCKED: REQUIRED COMMENTS TEXT MISSING"
+    )
+
+
+def should_recheck_irsplr_pdf_review(row, status=None) -> bool:
+    """Revalidate old EOF-only stops; never relabel them without reading the file."""
+    if not is_irsplr_court_code(row.get("CourtCode", row.get("Court Code", ""))):
+        return False
+    return normalize_status(row.get("Status", "") if status is None else status) == (
+        "MANUAL REVIEW REQUIRED - IRSPLR PDF: POSSIBLY TRUNCATED OR NONSTANDARD PDF - "
+        "THE FINAL PDF END MARKER IS MISSING OR FOLLOWED BY UNEXPECTED DATA; CORRUPTION IS NOT VERIFIED"
+    )
+
+
+def should_recheck_smd_decision_date(row, status=None, *, smd_mode=False) -> bool:
+    """An explicit sheet date can request cleanup of a completed SMD row."""
+    if not smd_mode or not normalize_status(row.get("Decision Date")):
+        return False
+    court = str(row.get("CourtCode", row.get("Court Code", "")) or "").strip().upper()
+    if court.startswith("FDMSPB") or any(check(row) for check in (
+        is_itc_row, is_irsplr_row, is_ohtax0_row, is_mnsutb_row, is_mework_row,
+        is_mosu00_row, is_fcc_row, is_ferc_row, is_nlrb_row,
+    )):
+        return False
+    current = normalize_status(row.get("Status", "") if status is None else status)
+    return current in {
+        STATUS_DONE, STATUS_ALREADY_PROCESSED, STATUS_DECISION_DATE_UPDATED,
+        STATUS_DATE_UPDATE_UNCONFIRMED,
+    } or (
+        current.startswith("MANUAL REVIEW REQUIRED - READY TO PROCESS LOCKED: DECISION DATE EXPECTED ")
+        and ";" not in current
+    )
 
 
 def mark_row_processing(row_index: int) -> None:
@@ -84,6 +162,12 @@ def mode_scope_df(df: pd.DataFrame | None, mode: str | None) -> pd.DataFrame:
         return df[df.apply(is_mework_row, axis=1)].copy()
     if normalized_mode == "mosu00":
         return df[df.apply(is_mosu00_row, axis=1)].copy()
+    if normalized_mode == "fcc":
+        return df[df.apply(is_fcc_row, axis=1)].copy()
+    if normalized_mode == "ferc":
+        return df[df.apply(is_ferc_row, axis=1)].copy()
+    if normalized_mode == "nlrb":
+        return df[df.apply(is_nlrb_row, axis=1)].copy()
     return df.copy()
 
 
@@ -114,6 +198,7 @@ def summarize_statuses_for_rows(
     counts: Counter[str] = Counter()
     rerun_rows = []
     done_rows = []
+    manual_review_rows = []
 
     if df is None or df.empty:
         for status in status_map.values():
@@ -124,9 +209,12 @@ def summarize_statuses_for_rows(
             "counts": dict(counts),
             "done_count": counts.get(STATUS_DONE, 0),
             "already_processed_count": counts.get(STATUS_ALREADY_PROCESSED, 0),
+            "decision_date_updated_count": counts.get(STATUS_DECISION_DATE_UPDATED, 0),
             "needs_rerun_count": sum(v for k, v in counts.items() if k.startswith(RERUN_STATUS_PREFIX)),
             "rerun_rows": [],
             "done_rows": [],
+            "manual_review_count": sum(v for k, v in counts.items() if is_manual_review_status(k)),
+            "manual_review_rows": [],
         }
 
     for idx, row in df.iterrows():
@@ -141,7 +229,9 @@ def summarize_statuses_for_rows(
             "File Name": str(row.get("FileName", "") or row.get("File Name", "") or ""),
             "Status": normalized,
         }
-        if normalized.startswith(RERUN_STATUS_PREFIX) and len(rerun_rows) < max_examples:
+        if is_manual_review_status(normalized) and len(manual_review_rows) < max_examples:
+            manual_review_rows.append(row_info)
+        elif normalized.startswith(RERUN_STATUS_PREFIX) and len(rerun_rows) < max_examples:
             rerun_rows.append(row_info)
         elif is_completed_status(normalized) and len(done_rows) < max_examples:
             done_rows.append(row_info)
@@ -150,9 +240,12 @@ def summarize_statuses_for_rows(
         "counts": dict(counts),
         "done_count": counts.get(STATUS_DONE, 0),
         "already_processed_count": counts.get(STATUS_ALREADY_PROCESSED, 0),
+        "decision_date_updated_count": counts.get(STATUS_DECISION_DATE_UPDATED, 0),
         "needs_rerun_count": sum(v for k, v in counts.items() if k.startswith(RERUN_STATUS_PREFIX)),
         "rerun_rows": rerun_rows,
         "done_rows": done_rows,
+        "manual_review_count": sum(v for k, v in counts.items() if is_manual_review_status(k)),
+        "manual_review_rows": manual_review_rows,
     }
 
 
@@ -229,7 +322,10 @@ def defer_main_rows_with_failed_counsel(
             continue
 
         status = normalize_status(status_updates_buffer.get(idx, row.get("Status", "")))
-        if is_completed_status(status):
+        # A review stop is terminal for the run, but it does not prove that
+        # counsel was archived correctly. Only successful/verified outcomes
+        # can satisfy a main opinion's counsel prerequisite.
+        if status in {STATUS_DONE, STATUS_ALREADY_PROCESSED, STATUS_DECISION_DATE_UPDATED} or status.startswith("DUPLICATE OF "):
             continue
 
         lni = str(row.get("LNI", "") or "").strip()

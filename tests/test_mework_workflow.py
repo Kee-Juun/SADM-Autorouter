@@ -86,11 +86,11 @@ class MEWORKWorkflowTests(unittest.TestCase):
         self.assertEqual(second.duplicate_of_lni, "A")
         self.assertFalse(different.is_true_duplicate)
 
-    def test_exclusion_wins_and_is_not_registered_as_duplicate(self):
+    def test_excluded_consent_decree_is_not_registered_as_duplicate(self):
         router = CaseLawRouter.__new__(CaseLawRouter)
-        excluded = self.metadata(excluded=True)
-        first = router.mark_mework_duplicate_status(0, self.row("A"), "A", excluded)
-        second = router.mark_mework_duplicate_status(1, self.row("B"), "B", excluded)
+        decree = self.metadata(excluded=True)
+        first = router.mark_mework_duplicate_status(0, self.row("A"), "A", decree)
+        second = router.mark_mework_duplicate_status(1, self.row("B"), "B", decree)
         self.assertFalse(first.is_true_duplicate)
         self.assertFalse(second.is_true_duplicate)
         self.assertEqual(mework_content_fingerprint_buffer, {})

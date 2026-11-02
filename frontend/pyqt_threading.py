@@ -15,7 +15,7 @@ from core.rerun_status import finalize_rerun_ready_statuses
 from core.smducar_workflow import run_automation_workflow
 
 class WorkerThread(QThread):
-    def __init__(self, update_progress, set_status, show_success, show_error, total_count, latest_excel, df, dar_mode=False, wc_mode=False, mspb_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
+    def __init__(self, update_progress, set_status, show_success, show_error, total_count, latest_excel, df, dar_mode=False, wc_mode=False, mspb_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False, fcc_mode=False, ferc_mode=False, nlrb_mode=False):
         super().__init__()
         self.update_progress = update_progress
         self.set_status = set_status
@@ -32,6 +32,9 @@ class WorkerThread(QThread):
         self.mnsutb_mode = mnsutb_mode
         self.mework_mode = mework_mode
         self.mosu00_mode = mosu00_mode
+        self.fcc_mode = fcc_mode
+        self.ferc_mode = ferc_mode
+        self.nlrb_mode = nlrb_mode
         # wc_mode parameter kept for backward compatibility but no longer used
         self._stop_requested = False
 
@@ -80,12 +83,15 @@ class WorkerThread(QThread):
                 mnsutb_mode=self.mnsutb_mode,
                 mework_mode=self.mework_mode,
                 mosu00_mode=self.mosu00_mode,
+                fcc_mode=self.fcc_mode,
+                ferc_mode=self.ferc_mode,
+                nlrb_mode=self.nlrb_mode,
             )
         except Exception as e:
             tb = traceback.format_exc()
             logging.error(f"Error in worker thread: {e}")
             logging.error(f"Worker thread traceback: {tb}")
-            mode = "mspb" if self.mspb_mode else "itc" if self.itc_mode else "irsplr" if self.irsplr_mode else "ohtax0" if self.ohtax0_mode else "mnsutb" if self.mnsutb_mode else "mework" if self.mework_mode else "mosu00" if self.mosu00_mode else "dar" if self.dar_mode else "smd"
+            mode = "nlrb" if self.nlrb_mode else "ferc" if self.ferc_mode else "fcc" if self.fcc_mode else "mspb" if self.mspb_mode else "itc" if self.itc_mode else "irsplr" if self.irsplr_mode else "ohtax0" if self.ohtax0_mode else "mnsutb" if self.mnsutb_mode else "mework" if self.mework_mode else "mosu00" if self.mosu00_mode else "dar" if self.dar_mode else "smd"
             rerun_summary = finalize_rerun_ready_statuses(
                 df=self.df,
                 latest_excel=self.latest_excel,

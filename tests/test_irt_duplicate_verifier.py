@@ -1,5 +1,8 @@
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+
+import pandas as pd
+from selenium.common.exceptions import TimeoutException
 
 from core.irt_duplicate_verifier import (
     IRTDocumentProfile,
@@ -66,6 +69,8 @@ class IRTDuplicateVerifierTests(unittest.TestCase):
         self.assertTrue(router.configure_irt_duplicate_verification(mspb_mode=True))
         self.assertTrue(router.configure_irt_duplicate_verification(itc_mode=True))
         self.assertTrue(router.configure_irt_duplicate_verification(mosu00_mode=True))
+        self.assertTrue(router.configure_irt_duplicate_verification(ferc_mode=True))
+        self.assertTrue(router.configure_irt_duplicate_verification(nlrb_mode=True))
 
     def test_sadm_duplicate_alert_processes_as_new_without_pdf_comparison(self):
         router = CaseLawRouter.__new__(CaseLawRouter)
@@ -80,6 +85,38 @@ class IRTDuplicateVerifierTests(unittest.TestCase):
         router.verify_irt_duplicate_overlay.assert_not_called()
         router.click_duplicate_process_radio.assert_called_once()
         router.click_duplicate_continue_button.assert_called_once()
+
+    def test_direct_sadm_batch_initializes_the_process_as_new_policy(self):
+        router = CaseLawRouter.__new__(CaseLawRouter)
+        router.configure_irt_duplicate_verification = Mock()
+        router.safe_alert_accept = Mock()
+
+        router.process_batch(pd.DataFrame(), None, None, None, "main")
+
+        router.configure_irt_duplicate_verification.assert_called_once_with()
+        router.safe_alert_accept.assert_called_once()
+
+    def test_dsar_alert_without_a_follow_up_leaves_modify_mode_ready(self):
+        router = CaseLawRouter.__new__(CaseLawRouter)
+        router.driver = Mock()
+        router.check_session_validity = Mock(return_value=True)
+        router.settle_irt_modify_transition = Mock(return_value="EDITABLE")
+
+        modify_button = Mock()
+        dsar_alert = Mock(text="The document has been marked as duplicate by DSAR")
+        waits = [
+            Mock(until=Mock(return_value=modify_button)),
+            Mock(until=Mock(return_value=dsar_alert)),
+            Mock(until=Mock(side_effect=TimeoutException())),
+        ]
+
+        with patch("core.smducar_router.WebDriverWait", side_effect=waits), patch(
+            "core.smducar_router.time.sleep"
+        ):
+            self.assertTrue(router.attempt_open_modify(max_attempts=1))
+
+        modify_button.click.assert_called_once()
+        dsar_alert.accept.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, UnexpectedAlertPresentException
+from selenium.common.exceptions import NoAlertPresentException, NoSuchElementException, NoSuchWindowException, TimeoutException, UnexpectedAlertPresentException
 import time
 import threading
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
@@ -52,12 +52,17 @@ from .smducar_selenium import (
 
 from .rerun_status import (
     STATUS_DONE,
+    STATUS_DECISION_DATE_UPDATED,
+    STATUS_DATE_UPDATE_UNCONFIRMED,
     STATUS_PROCESSING,
     STATUS_NEEDS_RERUN_INTERRUPTED,
     defer_main_rows_with_failed_counsel,
     is_completed_status,
     mark_row_processing,
     normalize_status,
+    should_recheck_irsplr_comment_review,
+    should_recheck_irsplr_pdf_review,
+    should_recheck_smd_decision_date,
 )
 
 from .mspb_extractor import (
@@ -66,9 +71,11 @@ from .mspb_extractor import (
 )
 
 from .irt_duplicate_verifier import (
+    IRTDocumentProfile,
     build_document_profile,
     compare_document_profiles,
 )
+from .irsplr_browser_check import confirm_browser_pdf
 
 from .itc_extractor import (
     ITCMetadata,
@@ -80,8 +87,10 @@ from .itc_extractor import (
 )
 
 from .irsplr_extractor import (
+    IRSPLRCorruptDocument,
+    IRSPLRDocumentReviewRequired,
     IRSPLRMetadata,
-    build_irsplr_unreadable_fallback_metadata,
+    build_irsplr_corrupt_exclusion_metadata,
     is_irsplr_row,
     parse_irsplr_document_text,
     parse_irsplr_pdf_bytes,
@@ -115,13 +124,57 @@ from .mosu00_extractor import (
     parse_mosu00_html_file,
     parse_mosu00_html_text,
 )
+from .fcc_extractor import FCCMetadata, is_fcc_row, parse_fcc_document_text, parse_fcc_pdf_bytes
+from .ferc_extractor import (
+    FERCMetadata,
+    is_ferc_row,
+    parse_ferc_document_text,
+    parse_ferc_docx_bytes,
+    parse_ferc_pdf_bytes,
+)
+from .nlrb_extractor import (
+    NLRBMetadata,
+    is_nlrb_row,
+    parse_nlrb_document_text,
+    parse_nlrb_pdf_bytes,
+)
 
 
 _itc_duplicate_lock = threading.Lock()
 
 
+def _has_explicit_metadata_router_mode(
+    *,
+    itc_mode=False,
+    irsplr_mode=False,
+    ohtax0_mode=False,
+    mnsutb_mode=False,
+    mework_mode=False,
+    mosu00_mode=False,
+    fcc_mode=False,
+    ferc_mode=False,
+    nlrb_mode=False,
+):
+    """Whether a selected router must take precedence over filename guesses."""
+    return any((
+        itc_mode,
+        irsplr_mode,
+        ohtax0_mode,
+        mnsutb_mode,
+        mework_mode,
+        mosu00_mode,
+        fcc_mode,
+        ferc_mode,
+        nlrb_mode,
+    ))
+
+
 class RouterSessionLostError(RuntimeError):
     """Raised when the active Selenium browser session can no longer be used."""
+
+
+class IRTFormRecoveryError(RuntimeError):
+    """A duplicate alert did not return a usable form; never continue to Save."""
 
 
 class CaseLawRouter:
@@ -146,6 +199,12 @@ class CaseLawRouter:
         self.mework_download_dir.mkdir(parents=True, exist_ok=True)
         self.mosu00_download_dir = Path.home() / "Downloads" / "Case Law Auto-Routing Resources" / "MOSU00 HTML Downloads"
         self.mosu00_download_dir.mkdir(parents=True, exist_ok=True)
+        self.fcc_download_dir = Path.home() / "Downloads" / "Case Law Auto-Routing Resources" / "FCC PDF Downloads"
+        self.fcc_download_dir.mkdir(parents=True, exist_ok=True)
+        self.ferc_download_dir = Path.home() / "Downloads" / "Case Law Auto-Routing Resources" / "FERC PDF Downloads"
+        self.ferc_download_dir.mkdir(parents=True, exist_ok=True)
+        self.nlrb_download_dir = Path.home() / "Downloads" / "Case Law Auto-Routing Resources" / "NLRB PDF Downloads"
+        self.nlrb_download_dir.mkdir(parents=True, exist_ok=True)
         self._archive_duplicate_mode = False
         self._irsplr_unreadable_pdf_signatures = set()
         # Populated only after IRT raises its own duplicate alert.  Keeping this
@@ -157,6 +216,11 @@ class CaseLawRouter:
         # enough to produce routine IRT duplicate alerts.  Their run setup
         # turns content verification off, but specialized modes retain it.
         self._irt_duplicate_verification_enabled = True
+        self._irsplr_duplicate_pdf_validation = False
+        self._irsplr_browser_first = False
+        self._irsplr_duplicate_review_reason = ""
+        self._itc_duplicate_verification = False
+        self._itc_duplicate_review_reason = ""
 
     @staticmethod
     def _is_invalid_session_error(error):
@@ -267,7 +331,7 @@ class CaseLawRouter:
                 continue
 
             row_status = str(status_updates_buffer.get(remaining_index) or df.loc[remaining_index].get("Status", "")).strip().upper()
-            if row_status in {"DONE", "ALREADY PROCESSED"}:
+            if row_status in {"DONE", "ALREADY PROCESSED", STATUS_DECISION_DATE_UPDATED}:
                 continue
             status_updates_buffer[remaining_index] = STATUS_NEEDS_RERUN_INTERRUPTED
 
@@ -285,7 +349,14 @@ class CaseLawRouter:
 
     def safe_fill_field(self, xpath, value, field_name="Field"):
         try:
+            is_decision_date = field_name == "Decision Date" or xpath == '//*[@id="decisionDate"]'
+            if is_decision_date:
+                value = self.normalize_mapping_decision_date(value)
+                if value is None:
+                    logging.info("Skipped Decision Date because no requested date was available; leaving the IRT value unchanged.")
+                    return
             value = self.normalize_irt_text(value)
+            requested_date_key = self._saved_date_key(value) if is_decision_date else None
             element = self.long_wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
 
             if not element.is_enabled() or element.get_attribute("readonly") == "true":
@@ -293,7 +364,10 @@ class CaseLawRouter:
                 return
 
             current_val = element.get_attribute("value")
-            if current_val and current_val.strip() == str(value).strip():
+            if current_val and (
+                current_val.strip() == str(value).strip()
+                or (requested_date_key is not None and self._saved_date_key(current_val) == requested_date_key)
+            ):
                 logging.info(f"{field_name} already set correctly. Skipping.")
                 return
 
@@ -354,7 +428,9 @@ class CaseLawRouter:
         existing = mspb_metadata_buffer.get(row_index, {})
         record = {
             "LNI": str(lni or existing.get("LNI", "")).strip(),
-            "File Name": str(row.get("FileName", existing.get("File Name", ""))).strip(),
+            "File Name": self.normalized_file_name(
+                row.get("FileName", existing.get("File Name", ""))
+            ),
             "Metadata Type": existing.get("Metadata Type", "MSPB"),
             "Extracted Court Code": existing.get("Extracted Court Code", ""),
             "Extracted Docket Number": existing.get("Extracted Docket Number", ""),
@@ -407,8 +483,21 @@ class CaseLawRouter:
         self.record_mspb_metadata(row_index, row, lni, metadata=metadata, metadata_status=metadata_status)
         if row_index in mspb_metadata_buffer:
             mspb_metadata_buffer[row_index]["Metadata Type"] = "IRSPLR"
+            if metadata is None and metadata_status in {"Attempted", "Search Failed"}:
+                mspb_metadata_buffer[row_index]["Route"] = "Not Routed"
             if metadata and getattr(metadata, "is_excluded", False):
                 mspb_metadata_buffer[row_index]["Route"] = "Archive"
+
+    def flag_irsplr_document_review(self, row, row_index, reason):
+        """Leave failed source documents untouched and visible in review reporting."""
+        status = f"MANUAL REVIEW REQUIRED - IRSPLR PDF: {reason}"
+        if row_index is not None:
+            status_updates_buffer[row_index] = status
+            self.record_irsplr_metadata(row_index, row, row.get("LNI", ""), metadata_status=status)
+            if row_index in mspb_metadata_buffer:
+                mspb_metadata_buffer[row_index]["Route"] = "Not Routed"
+        logging.warning("LNI %s: %s", row.get("LNI", ""), status)
+        return status
 
     def record_ohtax0_metadata(self, row_index, row, lni, metadata=None, metadata_status="Attempted"):
         """Capture OHTAX0 metadata used for the final workbook sheet."""
@@ -450,6 +539,26 @@ class CaseLawRouter:
                 mspb_metadata_buffer[row_index]["Extracted Other Numbers"] = "; ".join(child_dockets)
                 mspb_metadata_buffer[row_index]["Prepared Comments"] = getattr(metadata, "comments_text", "") or ""
 
+    def record_fcc_metadata(self, row_index, row, lni, metadata=None, metadata_status="Attempted"):
+        """Capture FCC extraction plus decisions that stop before IRT."""
+        self.record_mspb_metadata(row_index, row, lni, metadata=metadata, metadata_status=metadata_status)
+        if row_index in mspb_metadata_buffer:
+            mspb_metadata_buffer[row_index]["Metadata Type"] = "FCC"
+            if metadata and getattr(metadata, "is_excluded", False):
+                mspb_metadata_buffer[row_index]["Route"] = "Archive"
+
+    def record_ferc_metadata(self, row_index, row, lni, metadata=None, metadata_status="Attempted"):
+        """Capture FERC extraction and review outcomes for the mapping sheet."""
+        self.record_mspb_metadata(row_index, row, lni, metadata=metadata, metadata_status=metadata_status)
+        if row_index in mspb_metadata_buffer:
+            mspb_metadata_buffer[row_index]["Metadata Type"] = "FERC"
+
+    def record_nlrb_metadata(self, row_index, row, lni, metadata=None, metadata_status="Attempted"):
+        """Capture NLRB extraction and explicit review outcomes in the mapping sheet."""
+        self.record_mspb_metadata(row_index, row, lni, metadata=metadata, metadata_status=metadata_status)
+        if row_index in mspb_metadata_buffer:
+            mspb_metadata_buffer[row_index]["Metadata Type"] = "NLRB"
+
     def mark_itc_duplicate_status(self, row_index, row, lni, metadata: ITCMetadata):
         """Mark ITC metadata as a true duplicate when this run already saw identical PDF text."""
         if not metadata or not getattr(metadata, "content_fingerprint", ""):
@@ -474,6 +583,11 @@ class CaseLawRouter:
                 else:
                     existing_label = str(existing_record)
                     existing_lni = ""
+                if current_lni and str(existing_lni).strip().upper() == current_lni.upper():
+                    # Extraction precedes Modify. A pre-Save retry can see
+                    # its own cached fingerprint; that is not another case.
+                    logging.info("ITC fingerprint already belongs to this LNI; retaining normal routing on retry: %s", current_lni)
+                    return metadata
                 logging.warning(
                     "Confirmed ITC true duplicate by PDF text fingerprint: %s duplicates %s",
                     current_label,
@@ -698,6 +812,8 @@ class CaseLawRouter:
 
             logging.warning("IRSPLR PDF did not expose readable text.")
             return None
+        except (IRSPLRDocumentReviewRequired, RouterSessionLostError):
+            raise
         except Exception as e:
             logging.error(f"Error extracting IRSPLR metadata from PDF: {e}")
             return None
@@ -782,13 +898,90 @@ class CaseLawRouter:
             logging.error(f"Error extracting MOSU00 table metadata from HTML: {e}")
             return None
 
+    def extract_fcc_metadata_from_search_result(self, row, row_index=None):
+        try:
+            link_element = self.find_mspb_file_name_link(row)
+            if link_element is None:
+                logging.warning("FCC File Name link was not found in the search results.")
+                return None
+            metadata = self.open_fcc_link_and_extract_metadata(link_element, row)
+            return metadata if metadata and metadata.has_text_content else None
+        except Exception as exc:
+            logging.error("Error extracting FCC metadata from PDF: %s", exc)
+            return None
+
+    def extract_ferc_metadata_from_search_result(self, row, row_index=None):
+        try:
+            link_element = self.find_mspb_file_name_link(row)
+            if link_element is None:
+                logging.warning("FERC File Name link was not found in the search results.")
+                return None
+            metadata = self.open_ferc_link_and_extract_metadata(link_element, row)
+            return metadata if metadata and metadata.has_text_content else None
+        except Exception as exc:
+            logging.error("Error extracting FERC metadata from PDF: %s", exc)
+            return None
+
+    def extract_nlrb_metadata_from_search_result(self, row, row_index=None):
+        try:
+            # NLRB mapping sheets are intentionally allowed to contain only
+            # LNIs. Resolve the File Name anchor from that exact result row,
+            # not from a generic table cell or a different visible result.
+            link_element = self.find_nlrb_file_name_link(row)
+            if link_element is None:
+                logging.warning("NLRB File Name link was not found in the search results.")
+                return None
+            return self.open_nlrb_link_and_extract_metadata(link_element, row)
+        except Exception as exc:
+            logging.error("Error extracting NLRB metadata from PDF: %s", exc)
+            return None
+
+    def find_nlrb_file_name_link(self, row):
+        """Return the PDF anchor on the current NLRB result row for its LNI."""
+        lni = str(row.get("LNI", "") or "").strip()
+        if lni and lni.lower() != "nan":
+            lni_literal = self.xpath_literal(lni)
+            row_xpath = (
+                "//tr[.//td[contains(normalize-space(.), "
+                f"{lni_literal})]]"
+            )
+            for result_row in self.driver.find_elements(By.XPATH, row_xpath):
+                for link in result_row.find_elements(By.XPATH, ".//a[@href]"):
+                    href = self._get_element_href(link)
+                    if href:
+                        self.capture_file_name_from_link(row, link)
+                        return link
+            logging.warning("NLRB result row for LNI %s did not contain a File Name hyperlink.", lni)
+            return None
+
+        # A filename is optional for NLRB, but retain the generic lookup for
+        # manually prepared sheets that supply one.
+        return self.find_mspb_file_name_link(row)
+
     def find_mspb_file_name_link(self, row):
         """Find the clickable document link under the File Name column in IRT results."""
         file_name = str(row.get("FileName", "")).strip()
+        lni = str(row.get("LNI", "") or "").strip()
+
+        # Mapping sheets may deliberately contain just Court Code and LNI.
+        # In that case, anchor the lookup to the searched LNI's result row
+        # before considering a generic table/file-name fallback.
+        if lni and lni.lower() != "nan":
+            lni_literal = self.xpath_literal(lni)
+            row_xpath = (
+                "//tr[.//td[contains(normalize-space(.), "
+                f"{lni_literal})]]"
+            )
+            for result_row in self.driver.find_elements(By.XPATH, row_xpath):
+                for link in result_row.find_elements(By.XPATH, ".//a[@href]"):
+                    if self._get_element_href(link):
+                        self.capture_file_name_from_link(row, link)
+                        return link
 
         if file_name and file_name.lower() != "nan":
             for candidate in self.driver.find_elements(By.XPATH, f"//a[contains(normalize-space(.), {self.xpath_literal(file_name)})]"):
                 if candidate.is_displayed():
+                    self.capture_file_name_from_link(row, candidate)
                     return candidate
 
         # Prefer a link in the table column whose header says File Name.
@@ -814,8 +1007,10 @@ class CaseLawRouter:
                     links = file_cell.find_elements(By.XPATH, ".//a")
                     for link in links:
                         if link.is_displayed():
+                            self.capture_file_name_from_link(row, link)
                             return link
                     if file_cell.is_displayed():
+                        self.capture_file_name_from_link(row, file_cell)
                         return file_cell
             except Exception:
                 continue
@@ -823,11 +1018,13 @@ class CaseLawRouter:
         # Fallback: first visible PDF-looking link in the results.
         for candidate in self.driver.find_elements(By.XPATH, "//a[contains(translate(@href, 'PDF', 'pdf'), '.pdf')]"):
             if candidate.is_displayed():
+                self.capture_file_name_from_link(row, candidate)
                 return candidate
 
         # MOSU00 table rows can be HTML instead of PDF.
         for candidate in self.driver.find_elements(By.XPATH, "//a[contains(translate(@href, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '.html') or contains(translate(@href, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '.htm')]"):
             if candidate.is_displayed():
+                self.capture_file_name_from_link(row, candidate)
                 return candidate
 
         return None
@@ -962,6 +1159,285 @@ class CaseLawRouter:
             except Exception:
                 pass
 
+    def open_fcc_link_and_extract_metadata(self, element, row):
+        """Open the IRT File Name PDF and read its first-page FCC metadata.
+
+        FCC documents are often returned by IRT as attachment downloads in
+        headless Chrome.  In that case Chrome creates then immediately closes
+        the viewer tab, so download-and-parse must happen before attempting to
+        inspect browser-tab text.
+        """
+        main_tab = self.driver.current_window_handle
+        before_handles = set(self.driver.window_handles)
+        before_downloads = self.snapshot_fcc_downloads()
+        opened_tab = None
+        expected_filename = str(row.get("FileName", "")).strip()
+        try:
+            href = self._get_element_href(element)
+            target_url = urljoin(self.driver.current_url, href) if href else None
+            self.enable_chrome_downloads(self.fcc_download_dir)
+            self.enable_browser_network_capture()
+            if target_url:
+                self.driver.execute_script("window.open(arguments[0], '_blank');", target_url)
+            else:
+                element.click()
+
+            # IRT can serve File Name links as Content-Disposition attachments.
+            # Reading that saved file is reliable even if Chrome closes its
+            # transient PDF tab before Selenium can select it.
+            downloaded_metadata = self.wait_for_fcc_downloaded_metadata(
+                before_downloads,
+                expected_filename,
+                timeout=15,
+            )
+            if downloaded_metadata:
+                return downloaded_metadata
+
+            try:
+                WebDriverWait(self.driver, 12).until(lambda d: len(d.window_handles) > len(before_handles))
+                new_handles = set(self.driver.window_handles) - before_handles
+                if new_handles:
+                    opened_tab = new_handles.pop()
+                    self.driver.switch_to.window(opened_tab)
+            except TimeoutException:
+                logging.info("FCC PDF did not open a readable tab; continuing with download/network fallback.")
+
+            downloaded_metadata = self.wait_for_fcc_downloaded_metadata(
+                before_downloads,
+                expected_filename,
+                timeout=15,
+            )
+            if downloaded_metadata:
+                return downloaded_metadata
+
+            deadline = time.time() + 45
+            while time.time() < deadline:
+                downloaded_metadata = self.wait_for_fcc_downloaded_metadata(
+                    before_downloads,
+                    expected_filename,
+                    timeout=1,
+                )
+                if downloaded_metadata:
+                    return downloaded_metadata
+                self.wait_for_open_tab_load_state(timeout=5)
+                pdf_bytes = self.get_opened_pdf_bytes_from_browser_network(target_url, timeout=1)
+                if pdf_bytes:
+                    metadata = parse_fcc_pdf_bytes(pdf_bytes, filename_hint=expected_filename)
+                    if metadata and metadata.has_text_content:
+                        self.log_fcc_metadata(metadata, "browser PDF response")
+                        return metadata
+                for source, text in (
+                    ("Chrome accessibility tree", self.read_open_pdf_accessibility_text()),
+                    ("browser PDF viewer clipboard", self.copy_open_pdf_tab_text()),
+                    ("browser visible text", self.read_open_pdf_tab_text()),
+                ):
+                    metadata = parse_fcc_document_text(text, filename_hint=expected_filename)
+                    if metadata and metadata.has_text_content:
+                        self.log_fcc_metadata(metadata, source)
+                        return metadata
+                time.sleep(1)
+            self.log_mspb_pdf_tab_diagnostics()
+            return None
+        except Exception as exc:
+            logging.warning("Could not read FCC PDF in browser tab: %s", exc)
+            return None
+        finally:
+            try:
+                if opened_tab and opened_tab in self.driver.window_handles:
+                    self.driver.close()
+                if main_tab in self.driver.window_handles:
+                    self.driver.switch_to.window(main_tab)
+            except Exception:
+                pass
+
+    def open_ferc_link_and_extract_metadata(self, element, row):
+        """Open an IRT File Name link and obtain FERC metadata from PDF or DOCX."""
+        main_tab = self.driver.current_window_handle
+        before_handles = set(self.driver.window_handles)
+        before_downloads = self._snapshot_pdf_downloads(self.ferc_download_dir)
+        opened_tab = None
+        expected_filename = str(row.get("FileName", "")).strip()
+        try:
+            href = self._get_element_href(element)
+            target_url = urljoin(self.driver.current_url, href) if href else None
+            self.enable_chrome_downloads(self.ferc_download_dir)
+            self.enable_browser_network_capture()
+            if target_url:
+                self.driver.execute_script("window.open(arguments[0], '_blank');", target_url)
+            else:
+                element.click()
+
+            metadata = self._wait_for_ferc_downloaded_metadata(before_downloads, expected_filename, timeout=15)
+            if metadata:
+                return metadata
+            try:
+                WebDriverWait(self.driver, 12).until(lambda d: len(d.window_handles) > len(before_handles))
+                new_handles = set(self.driver.window_handles) - before_handles
+                if new_handles:
+                    opened_tab = new_handles.pop()
+                    self.driver.switch_to.window(opened_tab)
+            except TimeoutException:
+                logging.info("FERC document did not open a readable tab; continuing with download/network fallback.")
+
+            metadata = self._wait_for_ferc_downloaded_metadata(before_downloads, expected_filename, timeout=15)
+            if metadata:
+                return metadata
+
+            deadline = time.time() + 45
+            while time.time() < deadline:
+                metadata = self._wait_for_ferc_downloaded_metadata(before_downloads, expected_filename, timeout=1)
+                if metadata:
+                    return metadata
+                self.wait_for_open_tab_load_state(timeout=5)
+                pdf_bytes = self.get_opened_pdf_bytes_from_browser_network(target_url, timeout=1)
+                if pdf_bytes:
+                    metadata = parse_ferc_pdf_bytes(pdf_bytes, filename_hint=expected_filename)
+                    if metadata and metadata.has_text_content:
+                        self.log_ferc_metadata(metadata, "browser PDF response")
+                        return metadata
+                for source, text in (
+                    ("Chrome accessibility tree", self.read_open_pdf_accessibility_text()),
+                    ("browser PDF viewer clipboard", self.copy_open_pdf_tab_text()),
+                    ("browser visible text", self.read_open_pdf_tab_text()),
+                ):
+                    metadata = parse_ferc_document_text(text, filename_hint=expected_filename)
+                    if metadata and metadata.has_text_content:
+                        self.log_ferc_metadata(metadata, source)
+                        return metadata
+                time.sleep(1)
+            self.log_mspb_pdf_tab_diagnostics()
+            return None
+        except Exception as exc:
+            logging.warning("Could not read FERC document in browser tab: %s", exc)
+            return None
+        finally:
+            try:
+                if opened_tab and opened_tab in self.driver.window_handles:
+                    self.driver.close()
+                if main_tab in self.driver.window_handles:
+                    self.driver.switch_to.window(main_tab)
+            except Exception:
+                pass
+
+    def open_nlrb_link_and_extract_metadata(self, element, row):
+        """Open an NLRB File Name link and return parsed or review-safe metadata."""
+        logging.info(
+            "NLRB retrieval v2 active: authenticated browser fetch enabled; "
+            "viewer-only text is rejected. source=%s",
+            Path(__file__).resolve(),
+        )
+        main_tab = self.driver.current_window_handle
+        before_handles = set(self.driver.window_handles)
+        before_downloads = self._snapshot_pdf_downloads(self.nlrb_download_dir)
+        opened_tab = None
+        expected_filename = str(row.get("FileName", "")).strip()
+        try:
+            href = self._get_element_href(element)
+            target_url = urljoin(self.driver.current_url, href) if href else None
+            expected_filename = self.get_filename_from_document_href(href) or expected_filename
+            logging.info(
+                "NLRB file link resolved for LNI %s: url=%s, filename=%s",
+                str(row.get("LNI", "") or "").strip(),
+                "available" if target_url else "missing",
+                expected_filename or "not supplied",
+            )
+            self.enable_chrome_downloads(self.nlrb_download_dir)
+            self.enable_browser_network_capture()
+            if target_url:
+                self.driver.execute_script("window.open(arguments[0], '_blank');", target_url)
+            else:
+                element.click()
+
+            metadata = self._wait_for_nlrb_downloaded_metadata(before_downloads, expected_filename, timeout=15)
+            if metadata:
+                return metadata
+            try:
+                WebDriverWait(self.driver, 12).until(lambda d: len(d.window_handles) > len(before_handles))
+                new_handles = set(self.driver.window_handles) - before_handles
+                if new_handles:
+                    opened_tab = new_handles.pop()
+                    self.driver.switch_to.window(opened_tab)
+            except TimeoutException:
+                logging.info("NLRB document did not open a readable tab; continuing with download/network fallback.")
+
+            deadline = time.time() + 45
+            while time.time() < deadline:
+                metadata = self._wait_for_nlrb_downloaded_metadata(before_downloads, expected_filename, timeout=1)
+                if metadata:
+                    return metadata
+                self.wait_for_open_tab_load_state(timeout=5)
+                pdf_bytes = self.get_opened_pdf_bytes_from_browser_network(target_url, timeout=1)
+                if pdf_bytes:
+                    metadata = parse_nlrb_pdf_bytes(pdf_bytes, filename_hint=expected_filename)
+                    self.log_nlrb_metadata(metadata, "browser PDF response")
+                    return metadata
+
+                # The IRT link uses the current authenticated browser session.
+                # Fetch its response inside that same session before trusting
+                # any Chrome PDF-viewer accessibility text. This avoids reading
+                # toolbar labels (for example, only "Decision Date") as if
+                # they were document contents.
+                pdf_bytes = self.fetch_document_bytes_in_browser(target_url)
+                if pdf_bytes:
+                    metadata = parse_nlrb_pdf_bytes(pdf_bytes, filename_hint=expected_filename)
+                    self.log_nlrb_metadata(metadata, "authenticated browser fetch")
+                    return metadata
+                for source, text in (
+                    ("Chrome accessibility tree", self.read_open_pdf_accessibility_text()),
+                    ("browser PDF viewer clipboard", self.copy_open_pdf_tab_text()),
+                    ("browser visible text", self.read_open_pdf_tab_text()),
+                ):
+                    if self.looks_like_nlrb_text(text):
+                        metadata = parse_nlrb_document_text(text, filename_hint=expected_filename)
+                        self.log_nlrb_metadata(metadata, source)
+                        return metadata
+                time.sleep(1)
+            self.log_mspb_pdf_tab_diagnostics()
+            return None
+        except Exception as exc:
+            logging.warning("Could not read NLRB document in browser tab: %s", exc)
+            return None
+        finally:
+            try:
+                if opened_tab and opened_tab in self.driver.window_handles:
+                    self.driver.close()
+                if main_tab in self.driver.window_handles:
+                    self.driver.switch_to.window(main_tab)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _is_closed_irsplr_pdf_tab_error(error):
+        """A vanished PDF target is not proof that its browser session died."""
+        return isinstance(error, NoSuchWindowException) or any(
+            marker in str(error).lower()
+            for marker in ("no such window", "target window already closed", "web view not found")
+        )
+
+    def wait_for_irsplr_download_after_tab_close(self, main_tab, before_downloads, expected_filename, court_code, timeout=45):
+        """Restore Inventory before waiting for a PDF-to-download handoff."""
+        try:
+            if main_tab not in self.driver.window_handles:
+                raise RouterSessionLostError("No surviving Inventory tab remains after the IRSPLR PDF tab closed.")
+            self.driver.switch_to.window(main_tab)
+            # Check the surviving target, not the already-closed PDF target.
+            _ = self.driver.current_url
+        except RouterSessionLostError:
+            raise
+        except Exception as exc:
+            raise RouterSessionLostError("Could not restore the Inventory tab after the IRSPLR PDF tab closed.") from exc
+        if getattr(self, "_irsplr_browser_first", False) and not getattr(self, "_irsplr_viewer_passed", False):
+            raise IRSPLRDocumentReviewRequired(
+                "BROWSER CHECK UNCONFIRMED - PDF tab closed before Chrome loaded its pages; corruption is not verified"
+            )
+        logging.info(
+            "IRSPLR PDF tab closed during download handoff; Inventory is still available. Waiting up to %s seconds for %s.",
+            timeout, expected_filename or "the source PDF",
+        )
+        return self.wait_for_irsplr_downloaded_metadata(
+            before_downloads, expected_filename, court_code, timeout=timeout,
+        )
+
     def open_irsplr_link_and_extract_metadata(self, element, row):
         """Open the linked PDF in a browser tab and parse IRSPLR metadata from that tab."""
         main_tab = self.driver.current_window_handle
@@ -974,7 +1450,12 @@ class CaseLawRouter:
         try:
             href = self._get_element_href(element)
             expected_filename = self.get_filename_from_document_href(href) or file_name
-            self.enable_chrome_downloads(self.irsplr_download_dir)
+            self._irsplr_inventory_tab = main_tab
+            self._irsplr_viewer_passed = False
+            if getattr(self, "_irsplr_browser_first", False):
+                self.set_irsplr_browser_downloads(allowed=False)
+            else:
+                self.enable_chrome_downloads(self.irsplr_download_dir)
             if href:
                 target_url = urljoin(self.driver.current_url, href)
                 self.enable_browser_network_capture()
@@ -984,53 +1465,68 @@ class CaseLawRouter:
                 self.enable_browser_network_capture()
                 element.click()
 
-            downloaded_metadata = self.wait_for_irsplr_downloaded_metadata(
-                before_downloads,
-                expected_filename,
-                court_code,
-                timeout=20,
-            )
-            if downloaded_metadata:
-                return downloaded_metadata
-
             try:
-                WebDriverWait(self.driver, 10).until(lambda d: len(d.window_handles) > len(before_handles))
+                # Watch both outcomes: Chrome may keep a viewer tab or close
+                # it immediately after starting a download. Compare viewer
+                # errors with available bytes before classifying the failure.
+                WebDriverWait(self.driver, 10).until(
+                    lambda d: bool(set(d.window_handles) - before_handles)
+                    or self.find_completed_irsplr_download(before_downloads, expected_filename)
+                )
                 new_handles = set(self.driver.window_handles) - before_handles
                 if new_handles:
                     opened_tab = new_handles.pop()
                     self.driver.switch_to.window(opened_tab)
             except TimeoutException:
-                logging.info("IRSPLR link did not open a readable tab yet; continuing to watch for download.")
+                logging.info("IRSPLR link has not exposed a viewer or completed download yet.")
 
-            downloaded_metadata = self.wait_for_irsplr_downloaded_metadata(
-                before_downloads,
-                expected_filename,
-                court_code,
-                timeout=25,
-            )
-            if downloaded_metadata:
-                return downloaded_metadata
-
-            logging.info("Opened IRSPLR PDF link in a browser tab.")
-            metadata = self.wait_for_irsplr_metadata_from_open_tab(
-                target_url,
-                before_downloads=before_downloads,
-                expected_filename=expected_filename,
-                court_code=court_code,
-                timeout=45,
-            )
+            if opened_tab:
+                logging.info("Opened IRSPLR PDF link in a browser tab.")
+                metadata = self.wait_for_irsplr_metadata_from_open_tab(
+                    target_url, before_downloads=before_downloads,
+                    expected_filename=expected_filename, court_code=court_code, timeout=45,
+                )
+            else:
+                if getattr(self, "_irsplr_browser_first", False):
+                    raise IRSPLRDocumentReviewRequired(
+                        "BROWSER CHECK UNCONFIRMED - no PDF viewer tab opened; retry or supply a working PDF; corruption is not verified"
+                    )
+                # Do not scrape the Search Inventory page or clipboard as if
+                # they were the document when Chrome only made a download.
+                metadata = self.wait_for_irsplr_downloaded_metadata(
+                    before_downloads, expected_filename, court_code, timeout=45,
+                )
             if metadata:
                 return metadata
-
-            logging.warning("IRSPLR PDF tab opened, but metadata could not be extracted from the browser-rendered document.")
-            return None
+            raise IRSPLRDocumentReviewRequired(
+                "UNAVAILABLE OR UNREADABLE - no usable source PDF and complete metadata could be confirmed; supply a working PDF"
+            )
+        except (IRSPLRDocumentReviewRequired, RouterSessionLostError):
+            raise
         except Exception as e:
-            logging.warning(f"Could not read IRSPLR document in browser tab: {e}")
-            return None
+            if opened_tab and self._is_closed_irsplr_pdf_tab_error(e):
+                metadata = self.wait_for_irsplr_download_after_tab_close(
+                    main_tab, before_downloads, expected_filename, court_code,
+                )
+                if metadata:
+                    return metadata
+                raise IRSPLRDocumentReviewRequired(
+                    "UNAVAILABLE - the PDF tab closed and no usable completed download was confirmed; corruption is not verified"
+                ) from e
+            self._raise_if_invalid_session_error(e, "reading IRSPLR source PDF")
+            raise IRSPLRDocumentReviewRequired(
+                "UNAVAILABLE - the source PDF could not be opened or downloaded; supply a working PDF"
+            ) from e
         finally:
             try:
-                if opened_tab and opened_tab in self.driver.window_handles:
+                if opened_tab and opened_tab != main_tab and opened_tab in self.driver.window_handles:
+                    # Recovery may have focused Inventory. Never close the
+                    # current window without explicitly selecting the PDF.
+                    self.driver.switch_to.window(opened_tab)
                     self.driver.close()
+            except Exception:
+                pass
+            try:
                 if main_tab in self.driver.window_handles:
                     self.driver.switch_to.window(main_tab)
             except Exception:
@@ -1392,14 +1888,248 @@ class CaseLawRouter:
         self.log_mspb_pdf_tab_diagnostics()
         return None
 
+    def read_irsplr_pdf_viewer_error(self):
+        """Read visible Chrome PDF errors, including errors inside shadow DOM.
+
+        Do not search hidden textContent: Chrome keeps its error dialog in
+        the DOM even when a healthy PDF is displayed.
+        """
+        try:
+            message = self.driver.execute_script(r"""
+                const failure = /failed\s+to\s+load\s+pdf(?:\s+document)?/i;
+                function visible(element) {
+                    if (!element.getClientRects().length) return false;
+                    for (let node = element; node; node = node.parentElement || node.getRootNode().host) {
+                        const style = getComputedStyle(node);
+                        if (node.hidden || node.getAttribute('aria-hidden') === 'true' ||
+                            style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                    }
+                    return true;
+                }
+                function scan(root, inErrorDialog = false) {
+                    for (const element of root.querySelectorAll('*')) {
+                        const errorDialog = inErrorDialog || element.tagName === 'VIEWER-ERROR-DIALOG' ||
+                            element.tagName === 'DIALOG' || ['dialog', 'alertdialog', 'alert'].includes(element.getAttribute('role'));
+                        if (errorDialog && visible(element)) {
+                            const text = (element.innerText || '').trim();
+                            if (text.length < 600 && failure.test(text)) return 'Failed to load PDF document.';
+                        }
+                        if (element.shadowRoot) {
+                            const error = scan(element.shadowRoot, errorDialog);
+                            if (error) return error;
+                        }
+                    }
+                    return '';
+                }
+                return scan(document);
+            """)
+            if isinstance(message, str) and message:
+                return message
+            # A cross-origin PDF viewer may expose its modal through Chrome's
+            # accessibility tree rather than the outer page's DOM.
+            def error_in_tree(tree):
+                nodes = tree.get("nodes", [])
+                by_id = {node["nodeId"]: node for node in nodes if "nodeId" in node}
+
+                def dialog_text(node, seen):
+                    node_id = node.get("nodeId")
+                    if node.get("ignored") or node_id in seen:
+                        return ""
+                    seen.add(node_id)
+                    text = " ".join(str(node.get(key, {}).get("value", "")) for key in ("name", "description", "value"))
+                    return text + " " + " ".join(
+                        dialog_text(by_id[child], seen) for child in node.get("childIds", []) if child in by_id
+                    )
+
+                for node in nodes:
+                    if node.get("role", {}).get("value") in {"dialog", "alertdialog", "alert"} and re.search(
+                        r"failed\s+to\s+load\s+pdf(?:\s+document)?", dialog_text(node, set()), re.I,
+                    ):
+                        return "Failed to load PDF document."
+                return ""
+
+            error = error_in_tree(self.driver.execute_cdp_cmd("Accessibility.getFullAXTree", {}))
+            if error:
+                return error
+            # Built-in PDF viewers can live in a cross-origin child frame.
+            # Read its accessibility tree rather than bypassing DOM security.
+            def child_frames(frame_tree):
+                for child in frame_tree.get("childFrames", []):
+                    yield child["frame"]["id"]
+                    yield from child_frames(child)
+
+            frame_tree = self.driver.execute_cdp_cmd("Page.getFrameTree", {}).get("frameTree", {})
+            for frame_id in child_frames(frame_tree):
+                error = error_in_tree(self.driver.execute_cdp_cmd("Accessibility.getFullAXTree", {"frameId": frame_id}))
+                if error:
+                    return error
+        except Exception as exc:
+            if self._is_closed_irsplr_pdf_tab_error(exc):
+                # Let the opener restore Inventory and await the download;
+                # do not promote this target-only error to session loss.
+                raise
+            self._raise_if_invalid_session_error(exc, "checking IRSPLR PDF viewer")
+            logging.debug("IRSPLR PDF viewer error check was unavailable: %s", exc)
+        return ""
+
+    def set_irsplr_browser_downloads(self, *, allowed):
+        """Keep source bytes out of local downloads until Chrome passes the check."""
+        parameters = {"behavior": "allow" if allowed else "deny"}
+        if allowed:
+            parameters["downloadPath"] = str(self.irsplr_download_dir)
+        try:
+            self.driver.execute_cdp_cmd("Browser.setDownloadBehavior", parameters)
+        except Exception:
+            try:
+                self.driver.execute_cdp_cmd("Page.setDownloadBehavior", parameters)
+            except Exception as exc:
+                self._raise_if_invalid_session_error(exc, "configuring IRSPLR browser-first PDF check")
+                raise IRSPLRDocumentReviewRequired(
+                    "BROWSER CHECK UNAVAILABLE - download behavior could not be configured; retry this document"
+                ) from exc
+
+    def irsplr_source_headers(self, target_url):
+        """Check only response headers, from authenticated Inventory, without a download."""
+        viewer_tab = self.driver.current_window_handle
+        inventory_tab = getattr(self, "_irsplr_inventory_tab", None) or getattr(self, "_main_tab", None)
+        try:
+            if inventory_tab and inventory_tab in self.driver.window_handles:
+                self.driver.switch_to.window(inventory_tab)
+            if not target_url:
+                return {}
+            return self.driver.execute_async_script("""
+                const done = arguments[arguments.length - 1];
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 10000);
+                fetch(arguments[0], {method: 'HEAD', credentials: 'same-origin', signal: controller.signal})
+                  .then(response => done({ok: response.ok, status: response.status,
+                    content_type: response.headers.get('content-type') || '',
+                    content_length: response.headers.get('content-length') || ''}))
+                  .catch(() => done({ok: false}))
+                  .finally(() => clearTimeout(timer));
+            """, target_url) or {}
+        except Exception as exc:
+            self._raise_if_invalid_session_error(exc, "checking IRSPLR source access")
+            logging.warning("IRSPLR source headers could not be confirmed: %s", exc)
+            return {}
+        finally:
+            if viewer_tab in self.driver.window_handles:
+                self.driver.switch_to.window(viewer_tab)
+
+    def validate_irsplr_browser_pdf(self, target_url, *, timeout=45):
+        confirm_browser_pdf(
+            self.driver, self.read_irsplr_pdf_viewer_error,
+            lambda: self.irsplr_source_headers(target_url), timeout=timeout,
+        )
+
+    def _store_browser_verified_irsplr_pdf(self, pdf_bytes, expected_filename):
+        """Preserve the original bytes only after the browser check has passed."""
+        if not getattr(self, "_irsplr_viewer_passed", False):
+            raise IRSPLRDocumentReviewRequired("BROWSER CHECK UNCONFIRMED - local PDF download blocked")
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(expected_filename or "IRSPLR.pdf"))
+        name = name.rstrip(" .") or "IRSPLR.pdf"
+        if not name.lower().endswith(".pdf"):
+            name += ".pdf"
+        directory = Path(self.irsplr_download_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        base = Path(name)
+        for suffix in range(10000):
+            path = directory / (name if suffix == 0 else f"{base.stem} ({suffix}){base.suffix}")
+            try:
+                with path.open("xb") as output:
+                    output.write(pdf_bytes)
+                logging.info("IRSPLR browser-verified PDF saved: %s", path)
+                return path
+            except FileExistsError:
+                if path.read_bytes() == pdf_bytes:
+                    return path
+        raise OSError("No available IRSPLR PDF download filename")
+
+    def read_browser_verified_irsplr_metadata(self, target_url, expected_filename, court_code, *, timeout=45):
+        # Validation always precedes network-response extraction, local files,
+        # metadata parsing and OCR. The viewer itself necessarily fetches the PDF.
+        self._irsplr_viewer_passed = False
+        self._mspb_pdf_request_ids = set()
+        self._mspb_pdf_checked_request_ids = set()
+        self.validate_irsplr_browser_pdf(target_url, timeout=timeout)
+        self._irsplr_viewer_passed = True
+        self.set_irsplr_browser_downloads(allowed=True)
+        pdf_bytes = self.get_opened_pdf_bytes_from_browser_network(target_url, timeout=5)
+        if not pdf_bytes:
+            viewer_tab = self.driver.current_window_handle
+            inventory_tab = getattr(self, "_irsplr_inventory_tab", None) or getattr(self, "_main_tab", None)
+            try:
+                if inventory_tab and inventory_tab in self.driver.window_handles:
+                    self.driver.switch_to.window(inventory_tab)
+                if target_url:
+                    pdf_bytes = self._fetch_irt_pdf_in_current_browser(target_url, allow_non_pdf=True)
+            finally:
+                if viewer_tab in self.driver.window_handles:
+                    self.driver.switch_to.window(viewer_tab)
+        if not pdf_bytes:
+            raise IRSPLRDocumentReviewRequired(
+                "UNAVAILABLE - browser opened the PDF but its source bytes could not be retrieved; corruption is not verified"
+            )
+        metadata = parse_irsplr_pdf_bytes(pdf_bytes, filename_hint=expected_filename, court_code_hint=court_code)
+        self._store_browser_verified_irsplr_pdf(pdf_bytes, expected_filename)
+        if not metadata or not metadata.has_text_content:
+            raise IRSPLRDocumentReviewRequired(
+                "UNREADABLE - browser opened the PDF but native text/OCR did not supply complete metadata; supply the missing ruling number or decision date"
+            )
+        self.log_irsplr_metadata(metadata, "browser-verified source PDF")
+        return metadata
+
+    def inspect_irsplr_duplicate_in_browser(self, href):
+        """Inspect an existing LNI without editing it or downloading its PDF."""
+        inventory_tab = self.driver.current_window_handle
+        before_handles = set(self.driver.window_handles)
+        owned_tab = None
+        target_url = urljoin(self.driver.current_url, href)
+        try:
+            self.set_irsplr_browser_downloads(allowed=False)
+            self.driver.execute_script("window.open(arguments[0], '_blank');", target_url)
+            handles = WebDriverWait(self.driver, 15).until(lambda d: set(d.window_handles) - before_handles)
+            owned_tab = next(iter(handles))
+            self.driver.switch_to.window(owned_tab)
+            self._irsplr_inventory_tab = inventory_tab
+            self.validate_irsplr_browser_pdf(target_url)
+        except Exception as exc:
+            if self._is_closed_irsplr_pdf_tab_error(exc):
+                raise IRSPLRDocumentReviewRequired(
+                    "BROWSER CHECK UNCONFIRMED - candidate PDF viewer closed before its pages could be checked; corruption is not verified"
+                ) from exc
+            self._raise_if_invalid_session_error(exc, "checking IRSPLR duplicate PDF viewer")
+            raise
+        finally:
+            try:
+                if owned_tab and owned_tab in self.driver.window_handles:
+                    self.driver.switch_to.window(owned_tab)
+                    self.driver.close()
+            except Exception:
+                logging.debug("IRSPLR candidate viewer cleanup unavailable.", exc_info=True)
+            finally:
+                if inventory_tab in self.driver.window_handles:
+                    self.driver.switch_to.window(inventory_tab)
+
     def wait_for_irsplr_metadata_from_open_tab(self, target_url=None, before_downloads=None, expected_filename=None, court_code=None, timeout=45):
+        if getattr(self, "_irsplr_browser_first", False):
+            return self.read_browser_verified_irsplr_metadata(
+                target_url, expected_filename, court_code, timeout=timeout,
+            )
         deadline = time.time() + timeout
         self._mspb_pdf_request_ids = set()
         self._mspb_pdf_checked_request_ids = set()
         last_status_log = 0
+        validated_pdf = False
+        consecutive_viewer_errors = 0
+        last_viewer_error = ""
 
         while time.time() < deadline:
             self.wait_for_open_tab_load_state(timeout=5)
+
+            viewer_error = self.read_irsplr_pdf_viewer_error()
+            consecutive_viewer_errors = consecutive_viewer_errors + 1 if viewer_error else 0
+            last_viewer_error = viewer_error
 
             downloaded_metadata = self.wait_for_irsplr_downloaded_metadata(
                 before_downloads or {},
@@ -1407,21 +2137,49 @@ class CaseLawRouter:
                 court_code,
                 timeout=1,
             )
+            validated_pdf = validated_pdf or getattr(self, "_irsplr_last_download_validated", False)
             if downloaded_metadata:
+                if viewer_error:
+                    raise IRSPLRDocumentReviewRequired(
+                        "VIEWER LOAD FAILED BUT PDF VALIDATED - downloaded PDF metadata is readable; verify the viewer/source manually; corruption is not verified"
+                    )
                 return downloaded_metadata
 
             pdf_bytes = self.get_opened_pdf_bytes_from_browser_network(target_url, timeout=1)
             if pdf_bytes:
                 pdf_signature = ("network", hashlib.sha1(pdf_bytes).hexdigest())
-                if pdf_signature not in self._irsplr_unreadable_pdf_signatures:
+                if pdf_signature in self._irsplr_unreadable_pdf_signatures:
+                    validated_pdf = True
+                else:
                     metadata = parse_irsplr_pdf_bytes(pdf_bytes, filename_hint=expected_filename, court_code_hint=court_code)
+                    validated_pdf = True
                     if metadata and metadata.has_text_content:
+                        if viewer_error:
+                            raise IRSPLRDocumentReviewRequired(
+                                "VIEWER LOAD FAILED BUT PDF VALIDATED - PDF bytes have readable metadata; verify the viewer/source manually; corruption is not verified"
+                            )
                         self.log_irsplr_metadata(metadata, "browser PDF tab")
                         return metadata
                     self._irsplr_unreadable_pdf_signatures.add(pdf_signature)
                     logging.warning(
-                        "IRSPLR browser PDF did not expose readable text; OCR support is required for image-only PDFs."
+                        "IRSPLR browser PDF passed validation but native text/OCR did not provide complete metadata; this does not prove corruption."
                     )
+
+            if viewer_error:
+                if validated_pdf:
+                    raise IRSPLRDocumentReviewRequired(
+                        "VIEWER LOAD FAILED BUT PDF VALIDATED - PDF structure is readable but metadata/OCR needs review; corruption is not verified"
+                    )
+                # A temporary viewer error can disappear or be followed by a
+                # valid download. Allow the full retrieval window first.
+                time.sleep(0.5)
+                continue
+
+            if not validated_pdf:
+                # Viewer/clipboard text alone is not proof of a usable source
+                # file. A failed download must not become a normal routing.
+                time.sleep(0.5)
+                continue
 
             accessibility_text = self.read_open_pdf_accessibility_text()
             if self.looks_like_irsplr_text(accessibility_text):
@@ -1450,6 +2208,10 @@ class CaseLawRouter:
 
             time.sleep(2)
 
+        if consecutive_viewer_errors >= 2 and not validated_pdf:
+            raise IRSPLRCorruptDocument(
+                f"LOAD FAILED - {last_viewer_error}; the viewer repeatedly failed and no usable PDF could be opened or downloaded during the retrieval window"
+            )
         self.log_mspb_pdf_tab_diagnostics("IRSPLR")
         return None
 
@@ -1731,6 +2493,95 @@ class CaseLawRouter:
             time.sleep(0.5)
         return None
 
+    def snapshot_fcc_downloads(self):
+        """Capture the FCC download directory before opening one IRT file."""
+        self.fcc_download_dir.mkdir(parents=True, exist_ok=True)
+        snapshot = {}
+        for path in self.fcc_download_dir.glob("*"):
+            if path.is_file():
+                try:
+                    stat = path.stat()
+                    snapshot[path.name.lower()] = (stat.st_mtime, stat.st_size)
+                except Exception:
+                    continue
+        return snapshot
+
+    @staticmethod
+    def _snapshot_pdf_downloads(download_dir):
+        download_dir.mkdir(parents=True, exist_ok=True)
+        snapshot = {}
+        for path in download_dir.glob("*"):
+            if path.is_file():
+                try:
+                    stat = path.stat()
+                    snapshot[path.name.lower()] = (stat.st_mtime, stat.st_size)
+                except Exception:
+                    continue
+        return snapshot
+
+    def _wait_for_ferc_downloaded_metadata(self, before_downloads, expected_filename=None, timeout=30):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            document_path = self._find_completed_pdf_download(
+                self.ferc_download_dir,
+                before_downloads,
+                expected_filename,
+                allowed_suffixes=(".pdf", ".docx"),
+            )
+            if document_path:
+                try:
+                    parser = parse_ferc_docx_bytes if document_path.suffix.lower() == ".docx" else parse_ferc_pdf_bytes
+                    metadata = parser(document_path.read_bytes(), filename_hint=document_path.name)
+                    if metadata and metadata.has_text_content:
+                        self.log_ferc_metadata(metadata, f"downloaded {document_path.suffix.upper().lstrip('.')} {document_path.name}")
+                        return metadata
+                    logging.warning("Downloaded FERC document %s did not expose readable text.", document_path.name)
+                    return None
+                except Exception as exc:
+                    logging.warning("Downloaded FERC document could not be parsed: %s (%s)", document_path, exc)
+                    return None
+            time.sleep(0.5)
+        return None
+
+    def _wait_for_nlrb_downloaded_metadata(self, before_downloads, expected_filename=None, timeout=30):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            document_path = self._find_completed_pdf_download(
+                self.nlrb_download_dir,
+                before_downloads,
+                expected_filename,
+                allowed_suffixes=(".pdf",),
+            )
+            if document_path:
+                try:
+                    metadata = parse_nlrb_pdf_bytes(document_path.read_bytes(), filename_hint=document_path.name)
+                    self.log_nlrb_metadata(metadata, f"downloaded PDF {document_path.name}")
+                    return metadata
+                except Exception as exc:
+                    logging.warning("Downloaded NLRB document could not be parsed: %s (%s)", document_path, exc)
+                    return None
+            time.sleep(0.5)
+        return None
+
+    def wait_for_fcc_downloaded_metadata(self, before_downloads, expected_filename=None, timeout=30):
+        """Return parsed FCC metadata for the newly completed expected PDF."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            pdf_path = self.find_completed_fcc_download(before_downloads, expected_filename)
+            if pdf_path:
+                try:
+                    metadata = parse_fcc_pdf_bytes(pdf_path.read_bytes(), filename_hint=pdf_path.name)
+                    if metadata and metadata.has_text_content:
+                        self.log_fcc_metadata(metadata, f"downloaded PDF {pdf_path.name}")
+                        return metadata
+                    logging.warning("Downloaded FCC PDF %s did not expose readable text.", pdf_path.name)
+                    return None
+                except Exception as exc:
+                    logging.warning("Downloaded FCC PDF could not be parsed: %s (%s)", pdf_path, exc)
+                    return None
+            time.sleep(0.5)
+        return None
+
     def snapshot_itc_downloads(self):
         self.itc_download_dir.mkdir(parents=True, exist_ok=True)
         snapshot = {}
@@ -1830,6 +2681,7 @@ class CaseLawRouter:
         return None
 
     def wait_for_irsplr_downloaded_metadata(self, before_downloads, expected_filename=None, court_code=None, timeout=30):
+        self._irsplr_last_download_validated = False
         deadline = time.time() + timeout
         while time.time() < deadline:
             pdf_path = self.find_completed_irsplr_download(before_downloads, expected_filename)
@@ -1840,6 +2692,7 @@ class CaseLawRouter:
                 except Exception:
                     file_signature = ("download", str(pdf_path))
                 if file_signature in self._irsplr_unreadable_pdf_signatures:
+                    self._irsplr_last_download_validated = True
                     return None
                 try:
                     metadata = parse_irsplr_pdf_bytes(
@@ -1847,18 +2700,22 @@ class CaseLawRouter:
                         filename_hint=pdf_path.name,
                         court_code_hint=court_code,
                     )
+                    self._irsplr_last_download_validated = True
                     if metadata and metadata.has_text_content:
                         self.log_irsplr_metadata(metadata, f"downloaded PDF {pdf_path.name}")
                         return metadata
                     self._irsplr_unreadable_pdf_signatures.add(file_signature)
                     logging.warning(
-                        "Downloaded IRSPLR PDF %s did not expose readable text; OCR support is required for image-only PDFs.",
+                        "Downloaded IRSPLR PDF %s passed validation but native text/OCR did not provide complete metadata; this does not prove corruption.",
                         pdf_path.name,
                     )
                     return None
+                except IRSPLRDocumentReviewRequired:
+                    raise
                 except Exception as e:
-                    self._irsplr_unreadable_pdf_signatures.add(file_signature)
-                    logging.warning(f"Downloaded IRSPLR PDF could not be parsed: {pdf_path} ({e})")
+                    raise IRSPLRDocumentReviewRequired(
+                        "EXTRACTION UNAVAILABLE - the downloaded PDF could not be read; verify the file/OCR setup manually; corruption is not verified"
+                    ) from e
             time.sleep(0.5)
         return None
 
@@ -1972,10 +2829,23 @@ class CaseLawRouter:
 
     def find_completed_irsplr_download(self, before_downloads, expected_filename=None):
         expected_lower = expected_filename.lower() if expected_filename else None
-        active_downloads = list(self.irsplr_download_dir.glob("*.crdownload"))
+        active_downloads = set()
+        for partial in self.irsplr_download_dir.glob("*.crdownload"):
+            try:
+                stat = partial.stat()
+            except OSError:
+                continue
+            # An unchanged partial from a failed earlier run must not block
+            # a new completed PDF with the same expected filename.
+            if before_downloads.get(partial.name.lower()) != (stat.st_mtime, stat.st_size):
+                active_downloads.add(partial.name.lower())
         candidates = []
 
-        for path in self.irsplr_download_dir.glob("*.pdf"):
+        for path in self.irsplr_download_dir.glob("*"):
+            if not path.is_file() or not (
+                path.suffix.lower() == ".pdf" or re.fullmatch(r".+\.pdf\s*\(\d+\)", path.name, re.I)
+            ):
+                continue
             try:
                 stat = path.stat()
             except Exception:
@@ -1983,12 +2853,14 @@ class CaseLawRouter:
 
             prior = before_downloads.get(path.name.lower())
             changed = prior is None or prior != (stat.st_mtime, stat.st_size)
-            expected_match = self.path_matches_expected_download(path, expected_lower)
+            expected_match = self.path_matches_expected_download(path, expected_lower) or bool(
+                expected_lower and re.fullmatch(rf"{re.escape(expected_lower)}\s*\(\d+\)", path.name.lower())
+            )
             if expected_lower and not expected_match:
                 continue
 
             if (expected_match and changed) or (not expected_lower and changed):
-                if not any(str(download).lower().startswith(str(path).lower()) for download in active_downloads):
+                if path.name.lower() + ".crdownload" not in active_downloads:
                     candidates.append(path)
 
         if not candidates:
@@ -2127,6 +2999,58 @@ class CaseLawRouter:
         candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return candidates[0]
 
+    def find_completed_fcc_download(self, before_downloads, expected_filename=None):
+        """Find only the new completed download belonging to the FCC row."""
+        expected_lower = expected_filename.lower() if expected_filename else None
+        active_downloads = list(self.fcc_download_dir.glob("*.crdownload"))
+        candidates = []
+
+        for path in self.fcc_download_dir.glob("*.pdf"):
+            try:
+                stat = path.stat()
+            except Exception:
+                continue
+
+            prior = before_downloads.get(path.name.lower())
+            changed = prior is None or prior != (stat.st_mtime, stat.st_size)
+            expected_match = self.path_matches_expected_download(path, expected_lower)
+            if expected_lower and not expected_match:
+                continue
+            if not changed:
+                continue
+            if any(str(download).lower().startswith(str(path).lower()) for download in active_downloads):
+                continue
+            candidates.append(path)
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda candidate: candidate.stat().st_mtime, reverse=True)
+        return candidates[0]
+
+    def _find_completed_pdf_download(self, download_dir, before_downloads, expected_filename=None, allowed_suffixes=(".pdf",)):
+        expected_lower = expected_filename.lower() if expected_filename else None
+        active_downloads = list(download_dir.glob("*.crdownload"))
+        candidates = []
+        allowed_suffixes = tuple(suffix.lower() for suffix in allowed_suffixes)
+        for path in download_dir.glob("*"):
+            if not path.is_file() or path.suffix.lower() not in allowed_suffixes:
+                continue
+            try:
+                stat = path.stat()
+            except Exception:
+                continue
+            if expected_lower and not self.path_matches_expected_download(path, expected_lower):
+                continue
+            prior = before_downloads.get(path.name.lower())
+            if prior == (stat.st_mtime, stat.st_size):
+                continue
+            if any(str(download).lower().startswith(str(path).lower()) for download in active_downloads):
+                continue
+            candidates.append(path)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda candidate: candidate.stat().st_mtime)
+
     def find_completed_itc_download(self, before_downloads, expected_filename=None):
         expected_lower = expected_filename.lower() if expected_filename else None
         active_downloads = list(self.itc_download_dir.glob("*.crdownload"))
@@ -2181,6 +3105,39 @@ class CaseLawRouter:
         except Exception:
             return None
 
+    @staticmethod
+    def normalized_file_name(value):
+        """Return a usable workbook filename, never pandas' ``nan`` placeholder."""
+        file_name = str(value or "").strip()
+        return "" if file_name.lower() in {"nan", "none", "nat"} else file_name
+
+    def capture_file_name_from_link(self, row, element):
+        """Store the actual IRT document filename on the mapping row when available."""
+        href = self._get_element_href(element)
+        candidates = []
+        try:
+            candidates.append(element.get_attribute("textContent") or "")
+        except Exception:
+            pass
+        try:
+            candidates.append(element.text or "")
+        except Exception:
+            pass
+        candidates.append(self.get_filename_from_document_href(href) or "")
+
+        for candidate in candidates:
+            file_name = self.normalized_file_name(candidate)
+            # IRT File Name links display the full document filename. Require
+            # an expected document extension so labels such as "View" or an
+            # LNI link can never overwrite the mapping-sheet File Name field.
+            if file_name.lower().endswith((".pdf", ".docx", ".htm", ".html")):
+                previous = self.normalized_file_name(row.get("FileName", ""))
+                row["FileName"] = file_name
+                if file_name != previous:
+                    logging.info("Captured IRT File Name for LNI %s: %s", row.get("LNI", ""), file_name)
+                return file_name
+        return self.normalized_file_name(row.get("FileName", ""))
+
     def enable_browser_network_capture(self):
         try:
             self.driver.execute_cdp_cmd("Network.enable", {})
@@ -2231,6 +3188,54 @@ class CaseLawRouter:
         self._mspb_pdf_checked_request_ids = checked_request_ids
         return None
 
+    def fetch_document_bytes_in_browser(self, target_url, timeout=15):
+        """Return a PDF fetched with the authenticated browser session.
+
+        IRT serves some file links as downloads instead of opening a PDF tab.
+        An in-page fetch keeps the session cookies and produces raw PDF bytes
+        without relying on the PDF viewer or its accessibility tree.
+        """
+        if not target_url or str(target_url).lower().startswith("javascript:"):
+            return None
+        try:
+            self.driver.set_script_timeout(timeout)
+            result = self.driver.execute_async_script(
+                """
+                const url = arguments[0];
+                const done = arguments[arguments.length - 1];
+                fetch(url, { credentials: 'include', redirect: 'follow' })
+                    .then(async response => {
+                        const bytes = new Uint8Array(await response.arrayBuffer());
+                        if (!response.ok || bytes.length > 15 * 1024 * 1024) {
+                            done({ ok: false, status: response.status, size: bytes.length });
+                            return;
+                        }
+                        let binary = '';
+                        const chunkSize = 0x8000;
+                        for (let start = 0; start < bytes.length; start += chunkSize) {
+                            binary += String.fromCharCode(...bytes.subarray(start, start + chunkSize));
+                        }
+                        done({ ok: true, status: response.status, body: btoa(binary) });
+                    })
+                    .catch(error => done({ ok: false, error: String(error) }));
+                """,
+                target_url,
+            )
+            if result and result.get("ok"):
+                payload = base64.b64decode(result.get("body", ""))
+                if self.is_pdf_bytes(payload):
+                    return payload
+                logging.info("NLRB authenticated fetch returned a non-PDF response; continuing with other retrieval paths.")
+            elif result:
+                logging.info(
+                    "NLRB authenticated PDF fetch was unavailable (status=%s, size=%s).",
+                    result.get("status", "n/a"),
+                    result.get("size", "n/a"),
+                )
+        except Exception as exc:
+            logging.info("NLRB authenticated PDF fetch could not be used: %s", exc)
+        return None
+
     def read_performance_log_entries(self):
         try:
             return self.driver.get_log("performance")
@@ -2251,6 +3256,20 @@ class CaseLawRouter:
         if target_url_lower and response_url_lower == target_url_lower:
             return True
         return False
+
+    @staticmethod
+    def looks_like_nlrb_text(text):
+        """Reject Chrome PDF-viewer labels while allowing genuine NLRB text."""
+        value = str(text or "")
+        upper = value.upper()
+        has_docket = bool(re.search(r"\b\d{1,2}\s*[-–]\s*[A-Z]{1,3}\s*[-–]\s*\d{3,6}\b", upper))
+        has_heading = bool(re.search(r"(?m)^\s*(?:ORDER|DECISION|SUPPLEMENTAL DECISION)\b", value, re.I))
+        return (
+            len(value.strip()) >= 200
+            and "NATIONAL LABOR RELATIONS BOARD" in upper
+            and has_docket
+            and has_heading
+        )
 
     def get_network_response_body(self, request_id):
         try:
@@ -2548,6 +3567,41 @@ class CaseLawRouter:
             "; ".join(metadata.other_numbers or ()),
         )
 
+    def log_fcc_metadata(self, metadata, source):
+        logging.info(
+            "Extracted FCC metadata from %s: docket=%s decision_date=%s source_detail=%s title=%s review=%s",
+            source,
+            metadata.docket_number,
+            metadata.decision_date,
+            metadata.source_detail,
+            metadata.title_hint,
+            getattr(metadata, "review_status", ""),
+        )
+
+    def log_ferc_metadata(self, metadata, source):
+        logging.info(
+            "Extracted FERC metadata from %s: docket=%s decision_date=%s source_detail=%s other_numbers=%s title=%s review=%s",
+            source,
+            metadata.docket_number,
+            metadata.decision_date,
+            metadata.source_detail,
+            "; ".join(metadata.other_numbers or ()),
+            metadata.title_hint,
+            getattr(metadata, "review_status", ""),
+        )
+
+    def log_nlrb_metadata(self, metadata, source):
+        logging.info(
+            "Extracted NLRB metadata from %s: docket=%s decision_date=%s source_detail=%s other_numbers=%s title=%s review=%s",
+            source,
+            metadata.docket_number,
+            metadata.decision_date,
+            metadata.source_detail,
+            "; ".join(metadata.other_numbers or ()),
+            metadata.title_hint,
+            getattr(metadata, "review_status", ""),
+        )
+
     def log_irsplr_metadata(self, metadata, source):
         logging.info(
             "Extracted IRSPLR metadata from %s: court=%s docket=%s decision_date=%s source_detail=%s excluded=%s",
@@ -2627,16 +3681,112 @@ class CaseLawRouter:
         max_modify_attempts = 3
         self._active_duplicate_lni = str(row.get("LNI", "")).strip().upper()
         self._verified_duplicate_match = None
+        self._active_duplicate_row = row
+        self._active_irsplr_corrupt_exclusion = bool(getattr(irsplr_metadata, "is_verified_corrupt", False))
+        self._irsplr_duplicate_review_reason = ""
+        self._itc_duplicate_review_reason = ""
         # Store current tab state
         main_tab = getattr(self, '_main_tab', self.driver.current_window_handle)
         opened_tab = getattr(self, '_opened_tab', None)
+
+        smd_cleanup_allowed = not any((dar_mode, wc_mode, mspb_mode)) and all(
+            item is None for item in (
+                mspb_metadata, itc_metadata, irsplr_metadata, ohtax0_metadata,
+                mnsutb_metadata, mework_metadata, mosu00_metadata,
+            )
+        ) and not any(check(row) for check in (
+            is_itc_row, is_irsplr_row, is_ohtax0_row, is_mnsutb_row, is_mework_row,
+            is_mosu00_table_row, is_fcc_row, is_ferc_row, is_nlrb_row,
+        ))
+        cleanup_requested = smd_cleanup_allowed and bool(normalize_status(row.get("Decision Date")))
+        cleanup_required = should_recheck_smd_decision_date(row, smd_mode=cleanup_requested)
+        before_modify_cleanup = None
+
+        def date_cleanup(snapshot, *, already_modified=False):
+            try:
+                return self.update_smd_processed_decision_date(
+                    row, row_index, snapshot, already_modified=already_modified,
+                    original_snapshot=before_modify_cleanup if already_modified else None,
+                )
+            finally:
+                try:
+                    self._accept_smd_date_cleanup_alerts(timeout=0.25)
+                except Exception:
+                    logging.debug("Could not acknowledge a final SMD date-cleanup notice.", exc_info=True)
+                self._cleanup_tabs(getattr(self, "_opened_tab", opened_tab), main_tab)
+
+        if cleanup_requested:
+            try:
+                saved = self.read_smd_date_cleanup_snapshot()
+                if saved is None:
+                    saved = WebDriverWait(self.driver, 20).until(
+                        lambda _driver: self.read_smd_date_cleanup_snapshot()
+                    )
+            except Exception as exc:
+                self._raise_if_invalid_session_error(exc, "inspecting SMD date cleanup")
+                saved = None
+            before_modify_cleanup = saved
+            requested_key = self._saved_date_key(row.get("Decision Date"))
+            saved_key = self._saved_date_key(saved.get("decision_date")) if isinstance(saved, dict) else None
+            if (cleanup_required and saved is None) or (
+                isinstance(saved, dict) and saved.get("ready") is True
+                and (cleanup_required or requested_key != saved_key)
+            ):
+                return date_cleanup(saved)
+
+        if irsplr_metadata is not None and (
+            getattr(irsplr_metadata, "is_text_fallback", False)
+            or not getattr(irsplr_metadata, "has_text_content", False)
+        ) and not getattr(irsplr_metadata, "is_verified_corrupt", False):
+            status = self.flag_irsplr_document_review(
+                row, row_index, "UNREADABLE - a usable source PDF was not verified; supply a working PDF",
+            )
+            self._cleanup_tabs(opened_tab, main_tab)
+            return status
         
         # Let the outer form-opening wrapper own Modify retries. If the current
         # IRT tab is stale, one failed wait is enough; the next attempt should
         # reopen the LNI from Search Inventory instead of waiting in-place again.
         found_modify = self.attempt_open_modify(row_index=row_index, max_attempts=1)
+
+        if getattr(self, "_itc_duplicate_review_reason", ""):
+            status = "MANUAL REVIEW REQUIRED - ITC " + self._itc_duplicate_review_reason
+            status_updates_buffer[row_index] = status
+            self._cleanup_tabs(opened_tab, main_tab)
+            return status
+        if getattr(self, "_irsplr_duplicate_review_reason", ""):
+            status = self.flag_irsplr_document_review(row, row_index, self._irsplr_duplicate_review_reason)
+            self._cleanup_tabs(opened_tab, main_tab)
+            return status
+
+        if getattr(self, "_modify_blocked_ready", False):
+            # IRT found Modify but refused editing because Ready is already
+            # on. Inspect the saved record once; reopening cannot resolve a
+            # saved-state mismatch and must not conceal it as a missing button.
+            metadata = next((item for item in (
+                mspb_metadata, itc_metadata, irsplr_metadata, ohtax0_metadata,
+                mnsutb_metadata, mework_metadata, mosu00_metadata,
+            ) if item is not None), None)
+            if cleanup_requested:
+                saved = self.read_smd_date_cleanup_snapshot()
+                if cleanup_required or (
+                    isinstance(saved, dict)
+                    and self._saved_date_key(row.get("Decision Date")) != self._saved_date_key(saved.get("decision_date"))
+                ):
+                    logging.info("SMD date cleanup: processed state confirmed after Modify; correcting only the explicit sheet date.")
+                    return date_cleanup(saved, already_modified=True)
+            status = self.verify_ready_locked_form(
+                row, full_df, dar_mode=dar_mode, wc_mode=wc_mode, metadata=metadata,
+            )
+            status_updates_buffer[row_index] = status
+            self._cleanup_tabs(opened_tab, main_tab)
+            return status
         
         if found_modify:
+            if cleanup_required:
+                # A completed row must never fall back to normal routing just
+                # because its view did not expose Ready until Modify.
+                return date_cleanup(self.read_smd_date_cleanup_snapshot(), already_modified=True)
             if self._verified_duplicate_match:
                 status = self.save_verified_duplicate(row_index)
             else:
@@ -2659,6 +3809,11 @@ class CaseLawRouter:
                     mework_metadata=mework_metadata,
                     mosu00_metadata=mosu00_metadata,
                 )
+            if getattr(self, "_irsplr_duplicate_review_reason", ""):
+                status = self.flag_irsplr_document_review(row, row_index, self._irsplr_duplicate_review_reason)
+            if getattr(self, "_itc_duplicate_review_reason", ""):
+                status = "MANUAL REVIEW REQUIRED - ITC " + self._itc_duplicate_review_reason
+                status_updates_buffer[row_index] = status
             if status == "DONE" and self._verified_duplicate_match:
                 status = self.duplicate_status_label()
             if status == "DONE" or str(status).upper().startswith("DUPLICATE OF "):
@@ -2671,7 +3826,8 @@ class CaseLawRouter:
             
         else:
             # Could not find Modify button - implement fresh start strategy
-            logging.warning(f"Modify button not found on attempt {retry_count + 1}/{max_modify_attempts}")
+            retry_reason = "IRT form not editable after Modify" if getattr(self, "_modify_transition_incomplete", False) else "Modify button not found"
+            logging.warning("%s on attempt %d/%d", retry_reason, retry_count + 1, max_modify_attempts)
             
             # Immediately close IRT form tab and return to main tab
             self._cleanup_tabs(opened_tab, main_tab)
@@ -2685,7 +3841,7 @@ class CaseLawRouter:
                 
                 # Re-search the LNI to get a fresh page
                 lni = str(row["LNI"]).strip()
-                if not self.refresh_search_inventory_for_retry(reason=f"Modify button not found for LNI {lni}"):
+                if not self.refresh_search_inventory_for_retry(reason=f"{retry_reason} for LNI {lni}"):
                     status_updates_buffer[row_index] = "ERROR: MODIFY REFRESH RETRY FAILED"
                     return "ERROR: MODIFY REFRESH RETRY FAILED"
                 if self.handle_lni_search(lni):
@@ -2714,8 +3870,9 @@ class CaseLawRouter:
             else:
                 # All 3 attempts failed - log error and move on
                 logging.error(f"All 3 attempts failed for row {row_index}. Moving on to next LNI.")
-                status_updates_buffer[row_index] = "ERROR: MODIFY BUTTON NOT FOUND AFTER 3 ATTEMPTS"
-                return "ERROR: MODIFY BUTTON NOT FOUND AFTER 3 ATTEMPTS"
+                status = "ERROR: IRT FORM NOT EDITABLE AFTER 3 ATTEMPTS" if getattr(self, "_modify_transition_incomplete", False) else "ERROR: MODIFY BUTTON NOT FOUND AFTER 3 ATTEMPTS"
+                status_updates_buffer[row_index] = status
+                return status
     
     def _cleanup_tabs(self, opened_tab, main_tab):
         """Helper method to clean up tabs and return to main tab"""
@@ -2793,7 +3950,33 @@ class CaseLawRouter:
             mosu00_metadata=mosu00_metadata,
         )
 
-    def process_batch(self, df, full_df, file_path, update_progress, batch_type, dar_mode=False, wc_mode=False, mspb_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
+    def process_batch(self, df, full_df, file_path, update_progress, batch_type, dar_mode=False, wc_mode=False, mspb_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False, fcc_mode=False, ferc_mode=False, nlrb_mode=False, *, itc_mode=False):
+        # Older callers identify ITC through the batch name. Keep that API
+        # working while accepting an explicit flag from current callers.
+        itc_mode = itc_mode or batch_type == "itc"
+        explicit_metadata_router_mode = _has_explicit_metadata_router_mode(
+            itc_mode=itc_mode,
+            irsplr_mode=irsplr_mode,
+            ohtax0_mode=ohtax0_mode,
+            mnsutb_mode=mnsutb_mode,
+            mework_mode=mework_mode,
+            mosu00_mode=mosu00_mode,
+            fcc_mode=fcc_mode,
+            ferc_mode=ferc_mode,
+            nlrb_mode=nlrb_mode,
+        )
+        smd_date_cleanup = batch_type in {"counsel", "main"} and not any((
+            dar_mode, wc_mode, mspb_mode, explicit_metadata_router_mode,
+        ))
+        if smd_date_cleanup:
+            logging.info("SMD decision-date cleanup v2 active: explicit sheet dates are checked before and after Modify.")
+        # Standard SADM/DAR counsel and main-opinion batches may be invoked
+        # directly by a parallel worker.  Explicitly retain their expected
+        # Process-as-New behavior even if a caller skipped process_rows().
+        if irsplr_mode:
+            self.configure_irt_duplicate_verification(irsplr_mode=True)
+        elif batch_type in {"counsel", "main"} and not mosu00_mode:
+            self.configure_irt_duplicate_verification()
         self.safe_alert_accept()
 
         processed_rows = 0
@@ -2803,7 +3986,7 @@ class CaseLawRouter:
         total_duration = 0
 
         # Emit 0/total progress at the start so UI shows batch start immediately
-        if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mework", "mosu00"]:
+        if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mework", "mosu00", "fcc", "ferc", "nlrb"]:
             update_progress(batch_type, 0, total_rows)
 
         stop_batch = False
@@ -2811,10 +3994,26 @@ class CaseLawRouter:
             row = df.loc[full_index]
             try:
                 row_status = str(row.get("Status", "")).strip().upper()
-                if row_status in {"DONE", "ALREADY PROCESSED"} or row_status.startswith("DUPLICATE OF "):
+                recheck_old_comment_review = should_recheck_irsplr_comment_review(row, row_status)
+                recheck_pdf_review = should_recheck_irsplr_pdf_review(row, row_status)
+                recheck_date = should_recheck_smd_decision_date(row, row_status, smd_mode=smd_date_cleanup)
+                if is_completed_status(row_status) and not recheck_old_comment_review and not recheck_pdf_review and not recheck_date:
                     logging.info(f"Skipping completed row {full_index + 2} with status: {row_status}.")
                     status_updates_buffer[full_index] = row_status
                     continue
+
+                if recheck_date:
+                    logging.info("Checking only the requested Decision Date on completed SMD row %d.", full_index + 2)
+                    status_updates_buffer.pop(full_index, None)
+
+                if recheck_pdf_review:
+                    logging.info("Revalidating previous IRSPLR EOF-only review on row %d with structural and page-render checks.", full_index + 2)
+                    status_updates_buffer.pop(full_index, None)
+
+                if recheck_old_comment_review:
+                    logging.info("Rechecking previous IRSPLR comment-only review for row %d under the already-processed skip policy.", full_index + 2)
+                    if should_recheck_irsplr_comment_review(row, status_updates_buffer.get(full_index, "")):
+                        status_updates_buffer.pop(full_index, None)
 
                 lni = self.validate_row(row, full_index, file_path)
                 if not lni:
@@ -2832,12 +4031,20 @@ class CaseLawRouter:
                 mnsutb_metadata = None
                 mework_metadata = None
                 mosu00_metadata = None
+                fcc_metadata = None
+                ferc_metadata = None
+                nlrb_metadata = None
                 row_is_itc = is_itc_row(row)
                 row_is_irsplr = is_irsplr_row(row)
                 row_is_ohtax0 = is_ohtax0_row(row)
                 row_is_mnsutb = is_mnsutb_row(row)
                 row_is_mework = is_mework_row(row)
                 row_is_mosu00_table = is_mosu00_table_row(row)
+                row_is_fcc = is_fcc_row(row)
+                row_is_ferc = is_ferc_row(row)
+                row_is_nlrb = is_nlrb_row(row)
+                # The batch's explicit mode takes priority over these
+                # overlapping filename hints (including LDC_BC_ OHTAX0 PDFs).
                 if mspb_mode:
                     self.record_mspb_metadata(full_index, row, lni, metadata_status="Attempted")
 
@@ -2855,7 +4062,7 @@ class CaseLawRouter:
 
                     self.record_mspb_metadata(full_index, row, lni, metadata=mspb_metadata, metadata_status="Extracted")
                     self.click_matching_result()
-                elif row_is_itc:
+                elif itc_mode or (row_is_itc and not explicit_metadata_router_mode):
                     self.record_itc_metadata(full_index, row, lni, metadata_status="Attempted")
 
                     if not self.search_lni(lni) or not self.check_result_available():
@@ -2874,7 +4081,69 @@ class CaseLawRouter:
                     self.record_itc_metadata(full_index, row, lni, metadata=itc_metadata, metadata_status="Extracted")
                     self._archive_duplicate_mode = bool(getattr(itc_metadata, "is_true_duplicate", False))
                     self.click_matching_result()
-                elif irsplr_mode or row_is_irsplr:
+                elif fcc_mode or (row_is_fcc and not explicit_metadata_router_mode):
+                    self.record_fcc_metadata(full_index, row, lni, metadata_status="Attempted")
+                    if not self.search_lni(lni) or not self.check_result_available():
+                        self.record_fcc_metadata(full_index, row, lni, metadata_status="Search Failed")
+                        status_updates_buffer[full_index] = "ERROR: LNI NOT FOUND"
+                        continue
+                    fcc_metadata = self.extract_fcc_metadata_from_search_result(row, full_index)
+                    if not fcc_metadata:
+                        self.record_fcc_metadata(full_index, row, lni, metadata_status="Not Extracted")
+                        status_updates_buffer[full_index] = "NEEDS REVIEW"
+                        logging.warning("FCC row %d has no usable PDF metadata; no IRT changes made.", full_index + 2)
+                        continue
+                    self.record_fcc_metadata(full_index, row, lni, metadata=fcc_metadata, metadata_status="Extracted")
+                    if getattr(fcc_metadata, "requires_review", False):
+                        status = getattr(fcc_metadata, "review_status", "NEEDS REVIEW") or "NEEDS REVIEW"
+                        status_updates_buffer[full_index] = status
+                        logging.info("FCC row %d marked %s before IRT processing.", full_index + 2, status)
+                        continue
+                    # FCC has the same one-document form shape as ITC. Pass the
+                    # strongly typed FCC metadata through that shared form path.
+                    itc_metadata = fcc_metadata
+                    self.click_matching_result()
+                elif ferc_mode or (row_is_ferc and not explicit_metadata_router_mode):
+                    self.record_ferc_metadata(full_index, row, lni, metadata_status="Attempted")
+                    if not self.search_lni(lni) or not self.check_result_available():
+                        self.record_ferc_metadata(full_index, row, lni, metadata_status="Search Failed")
+                        status_updates_buffer[full_index] = "ERROR: LNI NOT FOUND"
+                        continue
+                    ferc_metadata = self.extract_ferc_metadata_from_search_result(row, full_index)
+                    if not ferc_metadata:
+                        self.record_ferc_metadata(full_index, row, lni, metadata_status="Not Extracted")
+                        status_updates_buffer[full_index] = "NEEDS REVIEW"
+                        logging.warning("FERC row %d has no usable PDF metadata; no IRT changes made.", full_index + 2)
+                        continue
+                    self.record_ferc_metadata(full_index, row, lni, metadata=ferc_metadata, metadata_status="Extracted")
+                    if getattr(ferc_metadata, "requires_review", False):
+                        status = getattr(ferc_metadata, "review_status", "NEEDS REVIEW") or "NEEDS REVIEW"
+                        status_updates_buffer[full_index] = status
+                        logging.info("FERC row %d marked %s before IRT processing.", full_index + 2, status)
+                        continue
+                    itc_metadata = ferc_metadata
+                    self.click_matching_result()
+                elif nlrb_mode or (row_is_nlrb and not explicit_metadata_router_mode):
+                    self.record_nlrb_metadata(full_index, row, lni, metadata_status="Attempted")
+                    if not self.search_lni(lni) or not self.check_result_available():
+                        self.record_nlrb_metadata(full_index, row, lni, metadata_status="Search Failed")
+                        status_updates_buffer[full_index] = "ERROR: LNI NOT FOUND"
+                        continue
+                    nlrb_metadata = self.extract_nlrb_metadata_from_search_result(row, full_index)
+                    if not nlrb_metadata:
+                        self.record_nlrb_metadata(full_index, row, lni, metadata_status="Not Extracted")
+                        status_updates_buffer[full_index] = "MANUAL REVIEW REQUIRED — DOCUMENT CONTENT UNREADABLE"
+                        logging.warning("NLRB row %d has no usable PDF metadata; no IRT changes made.", full_index + 2)
+                        continue
+                    self.record_nlrb_metadata(full_index, row, lni, metadata=nlrb_metadata, metadata_status="Extracted")
+                    if getattr(nlrb_metadata, "requires_review", False):
+                        status = getattr(nlrb_metadata, "review_status", "MANUAL REVIEW REQUIRED") or "MANUAL REVIEW REQUIRED"
+                        status_updates_buffer[full_index] = status
+                        logging.info("NLRB row %d marked %s before IRT processing.", full_index + 2, status)
+                        continue
+                    itc_metadata = nlrb_metadata
+                    self.click_matching_result()
+                elif irsplr_mode or (row_is_irsplr and not explicit_metadata_router_mode):
                     self.record_irsplr_metadata(full_index, row, lni, metadata_status="Attempted")
 
                     if not self.search_lni(lni) or not self.check_result_available():
@@ -2882,28 +4151,26 @@ class CaseLawRouter:
                         status_updates_buffer[full_index] = "ERROR: LNI NOT FOUND"
                         continue
 
-                    irsplr_metadata = self.extract_irsplr_metadata_from_search_result(row, full_index)
+                    try:
+                        irsplr_metadata = self.extract_irsplr_metadata_from_search_result(row, full_index)
+                    except IRSPLRCorruptDocument as exc:
+                        irsplr_metadata = build_irsplr_corrupt_exclusion_metadata(
+                            court_code_hint=row.get("CourtCode", ""), reason=str(exc),
+                        )
+                        logging.warning("LNI %s: verified PDF failure; routing Excluded / Archive with comment Exclude - Corrupt File. Reason: %s", lni, exc)
                     if not irsplr_metadata:
-                        irsplr_metadata = build_irsplr_unreadable_fallback_metadata(
-                            filename_hint=row.get("FileName", ""),
-                            court_code_hint=row.get("CourtCode", ""),
-                        )
-                        self.record_irsplr_metadata(
-                            full_index,
-                            row,
-                            lni,
-                            metadata=irsplr_metadata,
-                            metadata_status="Unreadable PDF Fallback",
-                        )
-                        logging.warning(
-                            "IRSPLR row %d PDF metadata could not be extracted; opening IRT form to check already-processed state.",
-                            full_index + 2,
+                        raise IRSPLRDocumentReviewRequired(
+                            "UNREADABLE OR UNAVAILABLE - PDF content and complete metadata could not be verified; supply a working PDF"
                         )
                     else:
-                        self.record_irsplr_metadata(full_index, row, lni, metadata=irsplr_metadata, metadata_status="Extracted")
+                        self.record_irsplr_metadata(
+                            full_index, row, lni, metadata=irsplr_metadata,
+                            metadata_status=(f"Verified Corrupt File - {irsplr_metadata.exclusion_reason}"
+                                             if getattr(irsplr_metadata, "is_verified_corrupt", False) else "Extracted"),
+                        )
 
                     self.click_matching_result()
-                elif ohtax0_mode or row_is_ohtax0:
+                elif ohtax0_mode or (row_is_ohtax0 and not explicit_metadata_router_mode):
                     self.record_ohtax0_metadata(full_index, row, lni, metadata_status="Attempted")
 
                     if not self.search_lni(lni) or not self.check_result_available():
@@ -2920,7 +4187,7 @@ class CaseLawRouter:
 
                     self.record_ohtax0_metadata(full_index, row, lni, metadata=ohtax0_metadata, metadata_status="Extracted")
                     self.click_matching_result()
-                elif mnsutb_mode or row_is_mnsutb:
+                elif mnsutb_mode or (row_is_mnsutb and not explicit_metadata_router_mode):
                     self.record_mnsutb_metadata(full_index, row, lni, metadata_status="Attempted")
 
                     if not self.search_lni(lni) or not self.check_result_available():
@@ -2937,7 +4204,7 @@ class CaseLawRouter:
 
                     self.record_mnsutb_metadata(full_index, row, lni, metadata=mnsutb_metadata, metadata_status="Extracted")
                     self.click_matching_result()
-                elif mework_mode or row_is_mework:
+                elif mework_mode or (row_is_mework and not explicit_metadata_router_mode):
                     self.record_mework_metadata(full_index, row, lni, metadata_status="Attempted")
 
                     if not self.search_lni(lni) or not self.check_result_available():
@@ -3043,6 +4310,10 @@ class CaseLawRouter:
                     })
 
 
+            except IRSPLRDocumentReviewRequired as exc:
+                # A source-document defect is a review stop for this row,
+                # not permission to Modify/Save it or stop other documents.
+                self.flag_irsplr_document_review(row, full_index, str(exc))
             except RouterSessionLostError as e:
                 logging.error(f"Router session lost while processing row {full_index + 2}: {e}")
                 self._mark_remaining_rows_after_router_session_loss(df, full_index, str(e))
@@ -3055,35 +4326,10 @@ class CaseLawRouter:
                 })
                 stop_batch = True
             except Exception as e:
-                logging.error(f"Error processing row {full_index + 2}")
-                if mspb_mode:
-                    existing_status = mspb_metadata_buffer.get(full_index, {}).get("Metadata Status", "")
-                    metadata_status = "Extracted" if existing_status == "Extracted" else "Error"
-                    self.record_mspb_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
-                elif is_itc_row(row):
-                    existing_status = mspb_metadata_buffer.get(full_index, {}).get("Metadata Status", "")
-                    metadata_status = "Extracted" if existing_status == "Extracted" else "Error"
-                    self.record_itc_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
-                elif is_irsplr_row(row):
-                    existing_status = mspb_metadata_buffer.get(full_index, {}).get("Metadata Status", "")
-                    metadata_status = "Extracted" if existing_status == "Extracted" else "Error"
-                    self.record_irsplr_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
-                elif is_ohtax0_row(row):
-                    existing_status = mspb_metadata_buffer.get(full_index, {}).get("Metadata Status", "")
-                    metadata_status = "Extracted" if existing_status == "Extracted" else "Error"
-                    self.record_ohtax0_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
-                elif is_mnsutb_row(row):
-                    existing_status = mspb_metadata_buffer.get(full_index, {}).get("Metadata Status", "")
-                    metadata_status = "Extracted" if existing_status == "Extracted" else "Error"
-                    self.record_mnsutb_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
-                elif is_mework_row(row):
-                    existing_status = mspb_metadata_buffer.get(full_index, {}).get("Metadata Status", "")
-                    metadata_status = "Extracted" if existing_status == "Extracted" else "Error"
-                    self.record_mework_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
-                elif is_mosu00_table_row(row):
-                    existing_status = mspb_metadata_buffer.get(full_index, {}).get("Metadata Status", "")
-                    metadata_status = "Extracted" if existing_status == "Extracted" else "Error"
-                    self.record_mosu00_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
+                logging.exception("Error processing row %d: %s", full_index + 2, e)
+                # Persist the primary error before optional diagnostics. A
+                # metadata-reporting failure must not leave PROCESSING rows
+                # absent from the final error report.
                 status_updates_buffer[full_index] = "ERROR"
                 error_log_entries.append({
                     "Row": full_index + 2,
@@ -3093,6 +4339,25 @@ class CaseLawRouter:
                     "Error Message": str(e)
                 })
                 try:
+                    existing_status = mspb_metadata_buffer.get(full_index, {}).get("Metadata Status", "")
+                    metadata_status = "Extracted" if existing_status == "Extracted" else "Error"
+                    if mspb_mode:
+                        self.record_mspb_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
+                    elif itc_mode or (is_itc_row(row) and not explicit_metadata_router_mode):
+                        self.record_itc_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
+                    elif irsplr_mode or (is_irsplr_row(row) and not explicit_metadata_router_mode):
+                        self.record_irsplr_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
+                    elif ohtax0_mode or (is_ohtax0_row(row) and not explicit_metadata_router_mode):
+                        self.record_ohtax0_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
+                    elif mnsutb_mode or (is_mnsutb_row(row) and not explicit_metadata_router_mode):
+                        self.record_mnsutb_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
+                    elif mework_mode or (is_mework_row(row) and not explicit_metadata_router_mode):
+                        self.record_mework_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
+                    elif is_mosu00_table_row(row):
+                        self.record_mosu00_metadata(full_index, row, row.get("LNI", ""), metadata_status=metadata_status)
+                except Exception:
+                    logging.warning("Could not record metadata diagnostics for row %d.", full_index + 2, exc_info=True)
+                try:
                     self.driver.close()
                     self.driver.switch_to.window(self.driver.window_handles[0])
                 except:
@@ -3101,12 +4366,12 @@ class CaseLawRouter:
                 self._archive_duplicate_mode = False
                 # ✅ Always update progress, regardless of success or error
                 processed_rows += 1
-                if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mework", "mosu00"]:
+                if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mework", "mosu00", "fcc", "ferc", "nlrb"]:
                     update_progress(batch_type, processed_rows, total_rows)
 
         # ✅ ⏱ Final summary log: outside the loop
             if stop_batch:
-                if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mework", "mosu00"]:
+                if update_progress and batch_type in ["counsel", "main", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mework", "mosu00", "fcc", "ferc", "nlrb"]:
                     update_progress(batch_type, total_rows, total_rows)
                 break
 
@@ -3208,17 +4473,46 @@ class CaseLawRouter:
                 self.show_error(f"Failed to switch to popup window")
             return None
 
+    def uses_irt_modify_recovery(self):
+        """ITC and NLRB share delayed/replaced IRT form controls."""
+        return bool(getattr(self, "_itc_duplicate_verification", False)
+                    or getattr(self, "_itc_field_recovery_active", False)
+                    or getattr(self, "_nlrb_form_recovery", False))
+
     def attempt_open_modify(self, file_path=None, row_index=None, max_attempts=3):
+        self._modify_blocked_ready = False
+        self._modify_transition_incomplete = False
         for attempt in range(1, max_attempts + 1):
             try:
                 # Check session validity before attempting to find Modify button
                 if not self.check_session_validity():
                     logging.error("Invalid session detected. Cannot proceed with Modify button click.")
                     raise RouterSessionLostError("Router browser session is no longer valid before Modify click.")
+
+                # A duplicate notice may already be waiting when the form
+                # opens. Accept it before a WebDriver lookup can dismiss it.
+                pending = self._accept_modify_transition_alerts()
+                if pending:
+                    state = self.settle_irt_modify_transition(initial_alerts=pending)
+                    if state == "EDITABLE":
+                        return True
+                    if state == "READY_LOCKED":
+                        self._modify_blocked_ready = True
+                        return False
+                    # An accepted duplicate warning starts a required dialog
+                    # workflow. If it times out, let the caller reopen the
+                    # record; do not click Modify again behind that dialog.
+                    return False
                 
                 logging.info(f"Attempt {attempt}/{max_attempts}: Waiting for Modify button...")
+                itc_recovery = self.uses_irt_modify_recovery()
+                modify_condition = (
+                    (lambda driver: next((button for button in driver.find_elements(By.ID, "modify")
+                                          if button.is_displayed() and button.is_enabled()), False))
+                    if itc_recovery else EC.element_to_be_clickable((By.XPATH, '//*[@id="modify"]'))
+                )
                 modify_btn = WebDriverWait(self.driver, 120).until(  # Reduced to 2 minutes (120 seconds) for faster failure detection
-                    EC.element_to_be_clickable((By.XPATH, '//*[@id="modify"]'))
+                    modify_condition
                 )
                 modify_btn.click()
                 logging.info("Clicked Modify button.")
@@ -3231,17 +4525,15 @@ class CaseLawRouter:
                     alert.accept()
                     logging.info(f"Accepted alert: {alert_text}")
 
-                    # If it's the 'ready to process' alert, we need to retry the click.
-                    if "ready to process = [on]" in alert_text.lower():
-                        logging.info("IRT Form is not yet ready. Waiting 5 seconds before retrying Modify click...")
-                        time.sleep(5)
-                        continue
+                    if self.is_ready_locked_alert(alert_text):
+                        state = self.settle_irt_modify_transition(initial_alerts=[alert_text])
+                        self._modify_blocked_ready = state == "READY_LOCKED"
+                        return state == "EDITABLE"
                     # Handle duplicate document alert
                     if "duplicate document" in alert_text.lower():
-                        if not self.handle_duplicate_lni_popup():
-                            return False
-                        # After handling, the form is ready for editing
-                        return True
+                        state = self.settle_irt_modify_transition(initial_alerts=[alert_text])
+                        self._modify_blocked_ready = state == "READY_LOCKED"
+                        return state == "EDITABLE"
                     # Handle DSAR duplicate alert - check for additional duplicate document alert after DSAR
                     if "dsar" in alert_text.lower() and "duplicate" in alert_text.lower():
                         logging.info("DSAR duplicate alert detected. Checking for additional duplicate document alert...")
@@ -3253,21 +4545,47 @@ class CaseLawRouter:
                             additional_alert_text = additional_alert.text.strip()
                             additional_alert.accept()
                             logging.info(f"Accepted additional alert after DSAR: {additional_alert_text}")
+
+                            if self.is_ready_locked_alert(additional_alert_text):
+                                state = self.settle_irt_modify_transition(initial_alerts=[additional_alert_text])
+                                self._modify_blocked_ready = state == "READY_LOCKED"
+                                return state == "EDITABLE"
                             
                             # If it's a duplicate document alert, handle it
                             if "duplicate document" in additional_alert_text.lower():
-                                if not self.handle_duplicate_lni_popup():
-                                    return False
-                                return True
+                                state = self.settle_irt_modify_transition(initial_alerts=[additional_alert_text])
+                                self._modify_blocked_ready = state == "READY_LOCKED"
+                                return state == "EDITABLE"
+                            # The DSAR notice and any non-document follow-up
+                            # were accepted. Modify mode is now usable.
+                            state = self.settle_irt_modify_transition()
+                            self._modify_blocked_ready = state == "READY_LOCKED"
+                            return state == "EDITABLE"
                         except TimeoutException:
                             logging.info("No additional alert found after DSAR duplicate alert.")
-                            # Continue with normal flow since no additional alert appeared
+                            # DSAR is informational for SADM/DARA, but still
+                            # confirm edit mode before using the form.
+                            state = self.settle_irt_modify_transition()
+                            self._modify_blocked_ready = state == "READY_LOCKED"
+                            return state == "EDITABLE"
+                    state = self.settle_irt_modify_transition(initial_alerts=[alert_text])
+                    self._modify_blocked_ready = state == "READY_LOCKED"
+                    return state == "EDITABLE"
                 except TimeoutException:
-                    # No alert appeared, which is the successful case.
-                    # The form should now be in modify mode.
-                    logging.info("No alert found. IRT Form is ready for editing.")
-                    return True # Successfully clicked Modify and no blocking alert appeared.
+                    # No native alert appeared; confirm that Modify completed.
+                    state = self.settle_irt_modify_transition()
+                    self._modify_blocked_ready = state == "READY_LOCKED"
+                    return state == "EDITABLE"
 
+            except UnexpectedAlertPresentException as exc:
+                # A warning can interrupt the Modify click itself. Preserve
+                # the overlay requirement even if Chrome already dismissed
+                # the native alert before returning this exception.
+                state = self.settle_irt_modify_transition(
+                    initial_alerts=[str(getattr(exc, "alert_text", None) or exc)],
+                )
+                self._modify_blocked_ready = state == "READY_LOCKED"
+                return state == "EDITABLE"
             except Exception as e:
                 error_msg = str(e)
                 logging.warning(f"Attempt {attempt}/{max_attempts} to click Modify button failed: {error_msg}")
@@ -3276,6 +4594,13 @@ class CaseLawRouter:
                 if self._is_invalid_session_error(e):
                     logging.error("Session invalid. Cannot retry - browser connection lost.")
                     raise RouterSessionLostError("Router browser session lost while opening Modify mode.") from e
+                if self.uses_irt_modify_recovery():
+                    try:
+                        snapshot = self.read_ready_locked_form()
+                    except Exception as diagnostic_error:
+                        self._raise_if_invalid_session_error(diagnostic_error, "reading ITC Modify failure diagnostics")
+                        snapshot = {}
+                    self.log_irt_modify_recovery_state(snapshot, phase="Modify button lookup/click", timeout=120)
                 
                 time.sleep(2) # Brief pause before the next attempt in the loop
 
@@ -3284,6 +4609,512 @@ class CaseLawRouter:
         if row_index is not None:
             status_updates_buffer[row_index] = "ERROR: MODIFY FAILED"
         return False
+
+    @staticmethod
+    def is_ready_locked_alert(text):
+        return bool(re.search(r"ready\s+to\s+process\s*=\s*\[\s*on\s*\]", str(text), re.IGNORECASE))
+
+    def _accept_modify_transition_alerts(self):
+        """Drain native notices before inspecting controls behind the alerts."""
+        texts = []
+        for _ in range(5):
+            try:
+                alert = self.driver.switch_to.alert
+                alert_text = alert.text
+                if not isinstance(alert_text, str):
+                    break
+                alert.accept()
+                texts.append(alert_text.strip())
+                logging.info("Accepted IRT form transition alert: %s", alert_text.strip())
+            except NoAlertPresentException:
+                break
+            except Exception as exc:
+                self._raise_if_invalid_session_error(exc, "accepting IRT form transition alert")
+                raise
+        return texts
+
+    def settle_irt_modify_transition(self, *, initial_alerts=(), timeout=None, allow_modify_retry=True, duplicate_overlay_timeout=30):
+        """Clear delayed duplicate UI and wait for a stable editing/Ready state.
+
+        A native duplicate warning always requires its following overlay to
+        appear and finish, even if the underlying form looks editable first.
+        Only after that workflow may we inspect the form's editing/Ready state.
+        """
+        self._last_transition_duplicate_cleared = False
+        self._modify_transition_incomplete = False
+        itc_recovery = self.uses_irt_modify_recovery()
+        timeout = (30 if itc_recovery else 8) if timeout is None else timeout
+        ready_warning = itc_recovery and any(self.is_ready_locked_alert(text) for text in initial_alerts)
+        ready_modify_retries = 0
+        next_ready_modify = time.monotonic() + 1
+        last_snapshot = {}
+        retried_modify = False
+        stable_state = None
+        stable_since = None
+        deadline = time.monotonic() + timeout
+        overlay_pending = False
+        overlay_deadline = None
+
+        def expect_duplicate_overlay():
+            nonlocal overlay_pending, overlay_deadline, stable_since
+            if not overlay_pending:
+                overlay_deadline = time.monotonic() + duplicate_overlay_timeout
+                logging.info(
+                    "Duplicate warning accepted; waiting up to %s seconds for its required overlay before using the IRT form.",
+                    duplicate_overlay_timeout,
+                )
+            overlay_pending = True
+            self._last_transition_duplicate_cleared = False
+            stable_since = None
+
+        if any("duplicate document" in text.lower() for text in initial_alerts):
+            expect_duplicate_overlay()
+
+        while time.monotonic() < (overlay_deadline if overlay_pending else deadline):
+            try:
+                alerts = self._accept_modify_transition_alerts()
+                if alerts:
+                    stable_since = None
+                    if any("duplicate document" in text.lower() for text in alerts):
+                        expect_duplicate_overlay()
+                    if itc_recovery and not ready_warning and any(self.is_ready_locked_alert(text) for text in alerts):
+                        ready_warning = True
+                        deadline = max(deadline, time.monotonic() + timeout)
+                radios = self.driver.find_elements(By.ID, "processDuplicate")
+                if any(radio.is_displayed() for radio in radios):
+                    if not self.handle_duplicate_overlay():
+                        logging.warning("Required duplicate overlay workflow failed; not proceeding with the IRT form.")
+                        self._modify_transition_incomplete = True
+                        return "NOT_READY"
+                    stable_since = None
+                    overlay_pending = False
+                    overlay_deadline = None
+                    self._last_transition_duplicate_cleared = True
+                    # Overlay handling can outlast the normal form wait. Give
+                    # the replacement form a fresh settling window afterward.
+                    deadline = time.monotonic() + timeout
+                    logging.info("Required duplicate overlay workflow completed; waiting for the IRT form to settle.")
+                if overlay_pending:
+                    # The form may be enabled while the overlay is still
+                    # loading. Never read/classify it or retry Modify here.
+                    time.sleep(0.2)
+                    continue
+                snapshot = self.read_ready_locked_form()
+                if not isinstance(snapshot, dict):
+                    stable_since = None
+                    time.sleep(0.2)
+                    continue
+                last_snapshot = snapshot
+                loaded = snapshot.get("docket") is not None and bool(snapshot.get("route"))
+                if itc_recovery and (snapshot.get("blocking_dialog") or snapshot.get("ready_visible") is False):
+                    loaded = False
+                state = None
+                if loaded and snapshot.get("ready") is True:
+                    state = "READY_LOCKED"
+                elif loaded and snapshot.get("ready") is False and snapshot.get("route_enabled") and snapshot.get("comments_enabled"):
+                    state = "EDITABLE"
+                if state:
+                    if stable_state != state or stable_since is None:
+                        stable_state, stable_since = state, time.monotonic()
+                    if time.monotonic() - stable_since >= (1.0 if state == "READY_LOCKED" else 0.4):
+                        logging.info("IRT form settled after Modify: %s", state)
+                        return state
+                else:
+                    stable_state, stable_since = None, None
+                    retry_ready_warning = (
+                        ready_warning and loaded and snapshot.get("ready") is False
+                        and ready_modify_retries < 2 and time.monotonic() >= next_ready_modify
+                    )
+                    retry_after_duplicate = self._last_transition_duplicate_cleared and not retried_modify
+                    if allow_modify_retry and snapshot.get("ready") is False and not snapshot.get("blocking_dialog") and (retry_after_duplicate or retry_ready_warning):
+                        buttons = self.driver.find_elements(By.ID, "modify")
+                        for button in buttons:
+                            if button.is_displayed() and button.is_enabled():
+                                # Count before click: a native warning may
+                                # interrupt it, and retries must stay bounded.
+                                if retry_ready_warning:
+                                    ready_modify_retries += 1
+                                    next_ready_modify = time.monotonic() + 3
+                                    logging.info("IRT Ready warning cleared and visible Ready is unchecked; retrying Modify on the same form (%d/2).", ready_modify_retries)
+                                if retry_after_duplicate:
+                                    retried_modify = True
+                                    logging.info("Duplicate notice cleared; entering Modify mode on the same IRT form.")
+                                button.click()
+                                break
+                time.sleep(0.2)
+            except UnexpectedAlertPresentException as exc:
+                # A delayed alert arrived between the DOM check and read.
+                stable_since = None
+                # Chrome may dismiss-and-notify before the next alert read.
+                # Preserve its duplicate warning instead of losing the gate.
+                if "duplicate document" in str(getattr(exc, "alert_text", None) or exc).lower():
+                    expect_duplicate_overlay()
+                elif itc_recovery and not ready_warning and self.is_ready_locked_alert(getattr(exc, "alert_text", None) or exc):
+                    ready_warning = True
+                    deadline = max(deadline, time.monotonic() + timeout)
+                time.sleep(0.2)
+            except Exception as exc:
+                self._raise_if_invalid_session_error(exc, "settling IRT Modify mode")
+                logging.warning("IRT form transition has not settled yet: %s", exc)
+                time.sleep(0.2)
+        if overlay_pending:
+            logging.warning("Timed out waiting for the required duplicate overlay after its warning; not filling or saving this IRT form.")
+        else:
+            logging.warning("IRT form did not settle into an editable or confirmed Ready-locked state.")
+        self.log_irt_modify_recovery_state(last_snapshot, ready_warning=ready_warning, overlay_pending=overlay_pending,
+                                          retries=ready_modify_retries, timeout=timeout)
+        self._modify_transition_incomplete = True
+        return "NOT_READY"
+
+    def log_irt_modify_recovery_state(self, snapshot, *, phase="settling", ready_warning=False,
+                                      overlay_pending=False, retries=0, timeout=None):
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        logging.warning(
+            "IRT Modify recovery state: phase=%s lni=%s docket=%r ready=%r ready_visible=%r ready_enabled=%r route=%r route_enabled=%r "
+            "comments_enabled=%r page_state=%r page_url=%r blocking_dialog=%r ready_warning=%s "
+            "duplicate_overlay_required=%s same_form_retries=%d timeout=%s",
+            phase, getattr(self, "_active_duplicate_lni", ""), snapshot.get("docket"), snapshot.get("ready"),
+            snapshot.get("ready_visible"), snapshot.get("ready_enabled"), snapshot.get("route"),
+            snapshot.get("route_enabled"), snapshot.get("comments_enabled"),
+            snapshot.get("page_state"), snapshot.get("page_url"), snapshot.get("blocking_dialog"),
+            ready_warning, overlay_pending, retries, timeout,
+        )
+
+    def read_ready_locked_form(self):
+        """Read saved form values without enabling, changing, or submitting them."""
+        return self.driver.execute_script(r"""
+            const preferVisible = arguments[0];
+            const visible = element => !!element && getComputedStyle(element).display !== 'none'
+                && getComputedStyle(element).visibility !== 'hidden' && element.getClientRects().length > 0;
+            const field = id => preferVisible
+                ? Array.from(document.querySelectorAll('[id="' + id + '"]')).find(visible) || null
+                : document.getElementById(id);
+            const value = id => {
+                const element = field(id);
+                return element ? String(element.value || '').trim() : null;
+            };
+            const selected = id => {
+                const element = field(id);
+                if (!element) return null;
+                const option = element.options && element.selectedIndex >= 0
+                    ? element.options[element.selectedIndex] : null;
+                return String(option ? (option.textContent || option.label || option.value || '')
+                    : (element.value || '')).trim();
+            };
+            const related = field('relatedLni');
+            const ready = field('readyToProcess');
+            const route = field('route');
+            const comments = field('comments');
+            return {
+                ready: ready ? ready.checked : null,
+                route: selected('route'),
+                source_detail: selected('sourceDetails'),
+                docket: value('docketNumber'),
+                decision_date: value('decisionDate'),
+                comments: value('comments'),
+                route_enabled: !!route && !route.disabled,
+                comments_enabled: !!comments && !comments.disabled && (!preferVisible || !comments.readOnly),
+                ready_enabled: !!ready && !ready.disabled,
+                ready_visible: visible(ready),
+                page_state: document.readyState,
+                page_url: location.href.split(/[?#]/)[0],
+                blocking_dialog: preferVisible && Array.from(document.querySelectorAll('[role="dialog"], .ui-dialog, .ui-widget-overlay'))
+                    .some(element => visible(element) && !element.contains(ready) && !element.contains(route)),
+                related_lnis: !related ? null : related.options
+                    ? Array.from(related.options).map(option => option.textContent || option.label || option.value || '').join('\n')
+                    : (related.textContent || '')
+            };
+        """, self.uses_irt_modify_recovery())
+
+    def read_smd_date_cleanup_snapshot(self):
+        """Read business values without enabling or changing any form control."""
+        return self.driver.execute_script(r"""
+            const date = document.getElementById('decisionDate');
+            const ready = document.getElementById('readyToProcess');
+            if (!date || !ready) return null;
+            const controls = Array.from(document.querySelectorAll('input, select, textarea'));
+            const protectedFields = {};
+            const recordLnis = new Set();
+            const lniPattern = /^[A-Z0-9]{4}(?:-[A-Z0-9]{4}){3}-[A-Z0-9]{5}-[A-Z0-9]{2}$/i;
+            controls.forEach((element, index) => {
+                const key = element.id || element.name || ('control-' + index);
+                const identity = String(element.id || '') + ' ' + String(element.name || '');
+                const value = String(element.value || '');
+                if (/lni/i.test(identity) && !/related|relate|search|parent|child|counsel|duplicate|original|recycled/i.test(identity)
+                    && lniPattern.test(value.trim())) recordLnis.add(value.trim().toUpperCase());
+                if (element === date || /^(hidden|button|submit|reset|file|password)$/i.test(element.type || '')) return;
+                // Server-generated audit and request tokens naturally change
+                // on Save; all other form values remain protected.
+                if (/lastmodified|modifiedby|modification|documenthistory|csrf|token|viewstate|eventvalidation|ui-datepicker/i.test(identity)) return;
+                protectedFields[key] = {
+                    value: value,
+                    checked: /^(checkbox|radio)$/i.test(element.type || '') ? !!element.checked : null,
+                    options: element.tagName === 'SELECT' && /relatedlni|tablecase/i.test(identity)
+                        ? Array.from(element.options || []).map(option => [option.value, option.textContent]) : null
+                };
+            });
+            // Some IRT versions show the document LNI as text beside its
+            // label instead of an input. Never infer identity from Comments
+            // or from a Related LNI list.
+            Array.from(document.querySelectorAll('label, td, th')).forEach(label => {
+                if (!/^(document\s*)?LNI\s*:?$/i.test(String(label.textContent || '').trim())) return;
+                const target = label.htmlFor ? document.getElementById(label.htmlFor) : label.nextElementSibling;
+                if (!target) return;
+                if (/related|relate|search|parent|child|counsel|duplicate|original|recycled/i.test(
+                    String(target.id || '') + ' ' + String(target.name || ''))) return;
+                const value = String(target.value || target.textContent || '').trim();
+                if (lniPattern.test(value)) recordLnis.add(value.toUpperCase());
+            });
+            const visibleDialogs = Array.from(document.querySelectorAll('[role="dialog"], .ui-dialog, .ui-widget-overlay'))
+                .some(element => {
+                    const style = getComputedStyle(element);
+                    return style.display !== 'none' && style.visibility !== 'hidden'
+                        && element.getClientRects().length > 0;
+                });
+            return {
+                ready: !!ready.checked,
+                decision_date: String(date.value || '').trim(),
+                docket: String((document.getElementById('docketNumber') || {}).value || '').trim(),
+                record_lni: recordLnis.size === 1 ? Array.from(recordLnis)[0] : null,
+                protected_fields: protectedFields,
+                blocking_dialog: visibleDialogs
+            };
+        """)
+
+    def _accept_smd_date_cleanup_alerts(self, timeout=1):
+        """Acknowledge notices without executing duplicate/routing workflows."""
+        notices = []
+        try:
+            alert = WebDriverWait(self.driver, timeout).until(EC.alert_is_present())
+        except TimeoutException:
+            return notices
+        except NoSuchWindowException:
+            if getattr(self, "_main_tab", None) in self.driver.window_handles:
+                return notices
+            raise
+        for _ in range(5):
+            text = str(alert.text or "").strip()
+            alert.accept()
+            notices.append(text)
+            logging.info("SMD date cleanup notice: %s", text)
+            try:
+                alert = self.driver.switch_to.alert
+            except NoAlertPresentException:
+                return notices
+        raise ValueError("repeated IRT alerts prevented date-only cleanup")
+
+    def update_smd_processed_decision_date(self, row, row_index, before, *, already_modified=False, original_snapshot=None):
+        """Modify only an explicit date on a saved record, then verify a fresh read."""
+        lni = str(row.get("LNI", "")).strip().upper()
+        save_attempted = False
+
+        def finish(status, detail=""):
+            status_updates_buffer[row_index] = status
+            logging.info("SMD date cleanup LNI %s: %s%s", lni, status, (" - " + detail) if detail else "")
+            return status
+
+        def review(reason):
+            if save_attempted:
+                return finish(STATUS_DATE_UPDATE_UNCONFIRMED, reason)
+            return finish("MANUAL REVIEW REQUIRED - SMD DATE CLEANUP: " + reason)
+
+        def unchanged(snapshot):
+            return isinstance(snapshot, dict) and snapshot.get("protected_fields") == before.get("protected_fields")
+
+        try:
+            requested_key = self._saved_date_key(row.get("Decision Date"))
+            if not requested_key:
+                return review("supply a valid Decision Date in the mapping sheet; no date was changed")
+            target = datetime.datetime.strptime(requested_key, "%Y-%m-%d").strftime("%m-%d-%Y")
+            if not isinstance(before, dict) or not before.get("protected_fields"):
+                return review("the existing IRT form could not be verified; no date was changed")
+            if before.get("ready") is not True or before.get("blocking_dialog"):
+                return review("the form is not a confirmed processed record or a dialog is still open; no date was changed")
+            if before.get("record_lni") != lni:
+                return review("the open IRT form's LNI does not match or could not be confirmed; no date was changed")
+            if already_modified and isinstance(original_snapshot, dict) and original_snapshot.get("protected_fields"):
+                original_fields = dict(original_snapshot["protected_fields"])
+                current_fields = dict(before["protected_fields"])
+                if original_snapshot.get("ready") is False and before.get("ready") is True:
+                    # IRT can expose its saved Ready state only after Modify.
+                    # The bot never toggles Ready during date cleanup.
+                    original_fields.pop("readyToProcess", None)
+                    current_fields.pop("readyToProcess", None)
+                if original_fields != current_fields:
+                    return review("another form value changed while Modify revealed the saved record; Save was not clicked")
+            expected_docket = extract_docket_number(str(row.get("FileName", "")))
+            docket_key = lambda value: re.sub(r"\s+", "", self.normalize_irt_text(value)).upper()
+            if not expected_docket or docket_key(expected_docket) != docket_key(before.get("docket", "")):
+                return review("the saved docket does not match the mapping filename; no date was changed")
+            if self._saved_date_key(before.get("decision_date")) == requested_key:
+                if normalize_status(row.get("Status")) == STATUS_DATE_UPDATE_UNCONFIRMED:
+                    return review("the date matches after a previously unconfirmed Save; check the prior run's saved-state warning before treating the record as complete")
+                return finish("ALREADY PROCESSED", "Decision Date already matches the sheet; no Modify or Save")
+
+            if not already_modified:
+                modify = WebDriverWait(self.driver, 20).until(EC.element_to_be_clickable((By.ID, "modify")))
+                modify.click()
+                notices = self._accept_smd_date_cleanup_alerts(timeout=3)
+                if any("duplicate" in notice.lower() for notice in notices):
+                    return review("a duplicate notice requires review; date cleanup did not enter its routing workflow")
+            def editable_date(driver):
+                field = driver.find_element(By.ID, "decisionDate")
+                return field if field.is_enabled() and field.get_attribute("readonly") in (None, False, "false") else False
+
+            try:
+                date_field = WebDriverWait(self.driver, 10).until(editable_date)
+            except TimeoutException:
+                return review("Decision Date remains locked after Modify/Correction; no date was changed")
+            editable = self.read_smd_date_cleanup_snapshot()
+            if not unchanged(editable) or editable.get("blocking_dialog"):
+                return review("IRT changed another form value or opened a dialog after Modify; Save was not clicked")
+            date_field.clear()
+            date_field.send_keys(target)
+            date_field.send_keys(Keys.TAB)
+            notices = self._accept_smd_date_cleanup_alerts(timeout=1)
+            if notices:
+                return review("IRT raised a notice while editing the date; verify it manually; Save was not clicked")
+            prepared = self.read_smd_date_cleanup_snapshot()
+            if not unchanged(prepared) or prepared.get("blocking_dialog"):
+                return review("another form value changed while entering the date; Save was not clicked")
+            if self._saved_date_key(prepared.get("decision_date")) != requested_key:
+                return review("IRT did not retain the requested date; Save was not clicked")
+
+            save_button = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.ID, "add")))
+            save_attempted = True
+            save_button.click()
+            notices = self._accept_smd_date_cleanup_alerts(timeout=2)
+            if any(re.search(r"\b(cannot|failed|invalid|error|duplicate)\b|\bnot\s+(saved|updated|valid)\b", notice, re.IGNORECASE)
+                   for notice in notices):
+                return review("IRT did not confirm the date-only Save")
+
+            # The edited input alone is not proof of persistence. Reopen the
+            # same LNI from Inventory without Modify and inspect saved values.
+            self._cleanup_tabs(self._opened_tab, self._main_tab)
+            if not self.handle_lni_search(lni):
+                return review("could not reopen the LNI to verify the saved date")
+
+            def loaded(_driver):
+                snapshot = self.read_smd_date_cleanup_snapshot()
+                return snapshot if isinstance(snapshot, dict) and snapshot.get("decision_date") else False
+
+            after = WebDriverWait(self.driver, 20).until(loaded)
+            if after.get("record_lni") != lni:
+                return review("reopened IRT form did not match the requested LNI")
+            if self._saved_date_key(after.get("decision_date")) != requested_key:
+                return review("the requested Decision Date was not confirmed after reopening")
+            if not unchanged(after) or after.get("blocking_dialog"):
+                return review("other saved form values differ after reopening; inspect IRT manually")
+            return finish(STATUS_DECISION_DATE_UPDATED, f"{before.get('decision_date') or 'blank'} -> {target}; saved and rechecked")
+        except Exception as exc:
+            if save_attempted:
+                status_updates_buffer[row_index] = STATUS_DATE_UPDATE_UNCONFIRMED
+            self._raise_if_invalid_session_error(exc, "updating SMD Decision Date only")
+            logging.warning("SMD date cleanup could not finish for LNI %s: %s", lni, exc)
+            return review("date-only cleanup could not be verified; " + str(exc))
+
+    @staticmethod
+    def _saved_date_key(value):
+        if isinstance(value, (datetime.date, datetime.datetime)):
+            return value.strftime("%Y-%m-%d")
+        text = str(value or "").strip()
+        for fmt in ("%m-%d-%Y", "%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                return datetime.datetime.strptime(text, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        return None
+
+    def verify_ready_locked_form(self, row, full_df, *, dar_mode=False, wc_mode=False, metadata=None):
+        """Verify a Ready-locked record against this run's intended fields/links."""
+        issues = []
+        try:
+            saved = self.read_ready_locked_form()
+            if not isinstance(saved, dict):
+                raise ValueError("saved form values unavailable")
+            name = str(row.get("FileName", "")).strip()
+            counsel = metadata is None and is_counsel(name, dar_mode, wc_mode)
+            expected_route = "Archive" if counsel or (
+                metadata is not None and (
+                    getattr(metadata, "is_excluded", False) or getattr(metadata, "is_true_duplicate", False)
+                )
+            ) else "Outside Conversion"
+            expected_docket = getattr(metadata, "docket_number", None) if metadata is not None else extract_docket_number(name, dar_mode, wc_mode)
+            expected_date = getattr(metadata, "decision_date", None) if metadata is not None else None
+            if metadata is None:
+                if counsel:
+                    expected_date = self.find_main_opinion_date_for_counsel(
+                        expected_docket, name, dar_mode, wc_mode, full_df=full_df,
+                    )
+                expected_date = expected_date or self.normalize_mapping_decision_date(row.get("Decision Date")) or self.extract_decision_date_from_filename(name)
+            expected_source = getattr(metadata, "source_detail", None) if metadata is not None else resolve_source_detail(row.get("SourceDetail", row.get("Source Detail", "")))
+
+            if saved.get("ready") is not True:
+                issues.append("saved Ready to Process state could not be confirmed")
+            if not self.dropdown_text_matches(saved.get("route"), expected_route):
+                issues.append(f"Route expected {expected_route}, found {saved.get('route') or 'blank/unavailable'}")
+            if not getattr(metadata, "is_verified_corrupt", False):
+                docket_key = lambda value: re.sub(r"\s+", "", self.normalize_irt_text(value)).upper()
+                if not expected_docket:
+                    issues.append("expected docket number unavailable")
+                elif docket_key(saved.get("docket")) != docket_key(expected_docket):
+                    issues.append(f"Docket expected {expected_docket}, found {saved.get('docket') or 'blank/unavailable'}")
+                if not self._saved_date_key(expected_date):
+                    issues.append("expected decision date unavailable")
+                elif self._saved_date_key(saved.get("decision_date")) != self._saved_date_key(expected_date):
+                    issues.append(f"Decision Date expected {expected_date}, found {saved.get('decision_date') or 'blank/unavailable'}")
+            if expected_source and not self.dropdown_text_matches(saved.get("source_detail"), expected_source):
+                issues.append(f"Source Detail expected {expected_source}, found {saved.get('source_detail') or 'blank/unavailable'}")
+
+            lni_pattern = r"\b[A-Z0-9]{4}(?:-[A-Z0-9]{4}){3}-[A-Z0-9]{5}-[A-Z0-9]{2}\b"
+            comments = str(saved.get("comments") or "")
+            if metadata is None and full_df is not None:
+                if counsel:
+                    expected_lnis = {
+                        str(candidate.get("LNI", "")).strip().upper()
+                        for _, candidate in full_df.iterrows()
+                        if not is_counsel(candidate.get("FileName", ""), dar_mode, wc_mode)
+                        and extract_docket_number(candidate.get("FileName", ""), dar_mode, wc_mode) == expected_docket
+                    }
+                    actual_lnis = set(re.findall(lni_pattern, comments.upper()))
+                    label = "main opinion LNI in Comments"
+                else:
+                    expected_lnis = set(get_related_counsel_lnis(
+                        expected_docket, full_df, recycled_lni=row.get("RecycledCounselLNI"),
+                        dar_mode=dar_mode, wc_mode=wc_mode,
+                    ))
+                    expected_lnis = {lni.upper() for lni in expected_lnis}
+                    actual_lnis = set(re.findall(lni_pattern, str(saved.get("related_lnis") or "").upper()))
+                    label = "related counsel LNI"
+                expected_lnis.discard("")
+                expected_lnis.discard("NAN")
+                if not expected_lnis:
+                    issues.append(f"expected {label} unavailable in mapping")
+                elif expected_lnis - actual_lnis:
+                    issues.append(f"missing {label}: {', '.join(sorted(expected_lnis - actual_lnis))}")
+            elif metadata is None:
+                issues.append("mapping unavailable to verify counsel/main LNI links")
+
+            # This is a saved Ready-locked record, not a new exclusion. Do
+            # not retroactively require the newly introduced corrupt-file
+            # comment. New exclusions still verify that comment before Save.
+            generated_comment = None if getattr(metadata, "is_verified_corrupt", False) else getattr(metadata, "comments_text", "")
+            for expected_comment in (row.get("Comments"), generated_comment):
+                if expected_comment is not None and str(expected_comment).strip().lower() not in {"", "nan", "none"}:
+                    compact = lambda value: re.sub(r"\s+", " ", self.normalize_irt_text(value)).strip().casefold()
+                    if compact(expected_comment) not in compact(comments):
+                        issues.append("required Comments text missing")
+        except Exception as exc:
+            self._raise_if_invalid_session_error(exc, "verifying Ready-locked IRT form")
+            logging.warning("Could not verify Ready-locked record: %s", exc)
+            issues.append("saved routing details unavailable; inspect IRT manually")
+
+        if issues:
+            status = "MANUAL REVIEW REQUIRED - READY TO PROCESS LOCKED: " + "; ".join(issues)
+            logging.warning("LNI %s: %s", row.get("LNI", ""), status)
+            return status
+        logging.info("LNI %s is Ready-locked and saved routing details match; ALREADY PROCESSED.", row.get("LNI", ""))
+        return "ALREADY PROCESSED"
 
     def clear_and_fill_input(self, xpath, value):
         from selenium.common.exceptions import TimeoutException
@@ -3384,6 +5215,76 @@ class CaseLawRouter:
             logging.error(f"Failed to click {xpath}")
             return False
 
+    def ensure_related_lni_input_ready(self, timeout=12):
+        """Restore Related state after an IRT duplicate dialog re-renders the form."""
+        related_xpath = '//*[@id="related"]'
+        related_lni_xpath = '//*[@id="relateLNIs"]'
+
+        def controls_are_ready(driver):
+            try:
+                checkbox = driver.find_element(By.XPATH, related_xpath)
+                field = driver.find_element(By.XPATH, related_lni_xpath)
+                return (
+                    checkbox.is_selected()
+                    and field.is_displayed()
+                    and field.is_enabled()
+                    and field.get_attribute("readonly") != "true"
+                )
+            except Exception:
+                return False
+
+        def click_checkbox(checkbox):
+            try:
+                checkbox.click()
+            except Exception:
+                self.driver.execute_script("arguments[0].click();", checkbox)
+
+        try:
+            # IRT has been observed to clear Related *after* dismissing the
+            # duplicate dialog. Re-arm it once, using a newly located element,
+            # rather than waiting against the stale pre-dialog form.
+            for attempt in range(1, 3):
+                related_checkbox = WebDriverWait(self.driver, timeout).until(
+                    EC.presence_of_element_located((By.XPATH, related_xpath))
+                )
+                if controls_are_ready(self.driver):
+                    logging.info("Related LNI controls are enabled and ready.")
+                    return True
+
+                if related_checkbox.is_selected():
+                    # A checked box with a locked input is IRT's post-dialog
+                    # half-state. Toggle it off before selecting it afresh.
+                    click_checkbox(related_checkbox)
+                    WebDriverWait(self.driver, 3).until(
+                        lambda driver: not driver.find_element(By.XPATH, related_xpath).is_selected()
+                    )
+                    related_checkbox = WebDriverWait(self.driver, timeout).until(
+                        EC.presence_of_element_located((By.XPATH, related_xpath))
+                    )
+
+                if not related_checkbox.is_selected():
+                    click_checkbox(related_checkbox)
+                    logging.info("Selected Related (recovery pass %d/2).", attempt)
+
+                # Selecting Related can reopen IRT's duplicate alert. Resolve
+                # it, then re-read the replacement controls on the next pass.
+                self.handle_any_alert(timeout=2)
+                try:
+                    WebDriverWait(self.driver, max(2, timeout // 3)).until(controls_are_ready)
+                    logging.info("Related LNI controls are enabled and ready.")
+                    return True
+                except TimeoutException:
+                    logging.warning(
+                        "Related LNI controls remained locked after recovery pass %d/2; rechecking IRT form.",
+                        attempt,
+                    )
+
+            logging.warning("Related LNI controls remained locked after both recovery passes.")
+            return False
+        except Exception as e:
+            logging.warning("Related LNI controls did not become ready: %s", e)
+            return False
+
 
     def click_ready_checkbox_and_check_overlay(self, is_counsel=True):
         """
@@ -3409,10 +5310,13 @@ class CaseLawRouter:
                     last_ready_exception = e
                     if attempt < 2:
                         logging.info("Ready to Process checkbox was not clickable on attempt %d/2; retrying.", attempt)
-                        self.handle_any_alert(timeout=1)
-                        time.sleep(1)
+                        state = self.settle_irt_modify_transition(allow_modify_retry=False)
+                        if state == "EDITABLE" and getattr(self, "_last_transition_duplicate_cleared", False) and not getattr(self, "_irt_duplicate_verification_enabled", True):
+                            # Process-as-New can reset Related/Route. Let the
+                            # caller refill the normal form before Ready/Save.
+                            return "DUPLICATE_FORM_RETRY"
             else:
-                logging.info("Ready to Process checkbox is not clickable; treating the document as already processed.")
+                logging.warning("Ready to Process remains unavailable after clearing pending form dialogs; not treating this as prior processing.")
                 return "READY_NOT_CLICKABLE"
 
             self.handle_any_alert(timeout=2)
@@ -3479,10 +5383,10 @@ class CaseLawRouter:
                     e,
                 )
                 return False
-            logging.info("Ready to Process checkbox is not clickable; treating the document as already processed.")
+            logging.warning("Ready to Process was not clicked; control availability does not prove prior processing.")
             return "READY_NOT_CLICKABLE"
 
-    def fill_irt_form(self, row, full_df, row_index, file_path, skip_ready_check=False, dar_mode=False, wc_mode=False, mspb_mode=False, mspb_metadata=None, itc_metadata=None, irsplr_metadata=None, ohtax0_metadata=None, mnsutb_metadata=None, mework_metadata=None, mosu00_metadata=None):
+    def fill_irt_form(self, row, full_df, row_index, file_path, skip_ready_check=False, dar_mode=False, wc_mode=False, mspb_mode=False, mspb_metadata=None, itc_metadata=None, irsplr_metadata=None, ohtax0_metadata=None, mnsutb_metadata=None, mework_metadata=None, mosu00_metadata=None, _duplicate_recovery_attempt=0):
         try:
             file_name = str(row["FileName"]).strip()
             is_counsel_file = is_counsel(file_name, dar_mode, wc_mode)
@@ -3491,7 +5395,13 @@ class CaseLawRouter:
             if mspb_mode:
                 return self.fill_mspb_irt_form(row, row_index, mspb_metadata)
             if itc_metadata:
-                return self.fill_itc_irt_form(row, row_index, itc_metadata)
+                context_label = (
+                    "FERC" if getattr(itc_metadata, "court", "") == "FDFERC00"
+                    else "FCC" if getattr(itc_metadata, "court", "") == "FDFCC000"
+                    else "NLRB" if getattr(itc_metadata, "court", "") == "FDNLRB00"
+                    else "ITC"
+                )
+                return self.fill_itc_irt_form(row, row_index, itc_metadata, context_label=context_label)
             if irsplr_metadata:
                 return self.fill_irsplr_irt_form(row, row_index, irsplr_metadata)
             if ohtax0_metadata:
@@ -3502,6 +5412,18 @@ class CaseLawRouter:
                 return self.fill_itc_irt_form(row, row_index, mework_metadata, context_label="MEWORK")
             if mosu00_metadata:
                 return self.fill_mosu00_table_irt_form(row, row_index, mosu00_metadata)
+
+            def refill_after_duplicate():
+                if _duplicate_recovery_attempt >= 1:
+                    status = "ERROR: DUPLICATE FORM RECOVERY FAILED"
+                    status_updates_buffer[row_index] = status
+                    return status
+                logging.info("Duplicate notice cleared; refilling routing details and LNI links on the same form before Ready/Save.")
+                return self.fill_irt_form(
+                    row, full_df, row_index, file_path,
+                    skip_ready_check=skip_ready_check, dar_mode=dar_mode, wc_mode=wc_mode,
+                    _duplicate_recovery_attempt=_duplicate_recovery_attempt + 1,
+                )
             
             # A matched main opinion is the decision-date authority for a
             # counsel record.  Counsel is intentionally processed first, but
@@ -3585,13 +5507,15 @@ class CaseLawRouter:
                     comments_enabled = comments_field.is_enabled()
                     route_enabled = route_field.is_enabled()
 
-                    # If route is disabled but comments is fine → mark as already processed
+                    # A late duplicate notice can disable Route. This is a
+                    # fresh editing session, so neither a locked control nor
+                    # an unsaved Ready toggle proves prior processing.
                     if not route_enabled and comments_enabled:
-                        logging.info("Route dropdown is disabled — document already processed. Skipping Save & flagging as ALREADY PROCESSED.")
-                        status_updates_buffer[row_index] = "ALREADY PROCESSED"
-                        self.driver.close()
-                        self.driver.switch_to.window(self.driver.window_handles[0])
-                        return "ALREADY PROCESSED"
+                        state = self.settle_irt_modify_transition(allow_modify_retry=False)
+                        if state != "EDITABLE":
+                            raise RuntimeError("IRT form controls remained unavailable after clearing duplicate UI")
+                        if getattr(self, "_last_transition_duplicate_cleared", False) and not getattr(self, "_irt_duplicate_verification_enabled", True):
+                            return refill_after_duplicate()
 
                     # If both comments and route are disabled → retry (or skip if main)
                     if not comments_enabled and not route_enabled:
@@ -3638,6 +5562,8 @@ class CaseLawRouter:
             # Proceed to Ready to Process
             overlay_appeared = self.click_ready_checkbox_and_check_overlay(is_counsel_file)
             self.handle_any_alert()
+            if overlay_appeared == "DUPLICATE_FORM_RETRY":
+                return refill_after_duplicate()
             if overlay_appeared == "ROUTE_ERROR":
                 logging.info("Marking as ROUTE ERROR due to route alert after Ready to Process.")
                 self.driver.close()
@@ -3649,11 +5575,12 @@ class CaseLawRouter:
                 self.driver.switch_to.window(self.driver.window_handles[0])
                 return "ALERT_HANDLED"
             if overlay_appeared == "READY_NOT_CLICKABLE":
-                logging.info("Ready to Process checkbox was not clickable; marking document as ALREADY PROCESSED.")
-                status_updates_buffer[row_index] = "ALREADY PROCESSED"
-                self.driver.close()
-                self.driver.switch_to.window(self.driver.window_handles[0])
-                return "ALREADY PROCESSED"
+                # We entered this path on a fresh editable form. A disabled
+                # checkbox (even one changed by an interrupted click) is not
+                # evidence of a saved record. Reopen safely on the retry path.
+                status = "NON-INTERACTABLE IRT FORM"
+                status_updates_buffer[row_index] = status
+                return status
 
             return self.handle_routing_and_save(is_counsel_file, row_index, skip_route_and_ready=True)
 
@@ -3816,6 +5743,12 @@ class CaseLawRouter:
     def fill_itc_irt_form(self, row, row_index, itc_metadata: ITCMetadata, context_label="ITC"):
         """Fill an IRT form for a single-document mode with ITC-style routing rules."""
         previous_archive_duplicate_mode = self._archive_duplicate_mode
+        previous_recovery = getattr(self, "_itc_field_recovery_active", False)
+        previous_failure = getattr(self, "_itc_field_failure_reason", "")
+        previous_ready_attempted = getattr(self, "_itc_ready_attempted", False)
+        self._itc_field_recovery_active = context_label in {"ITC", "NLRB"}
+        self._itc_field_failure_reason = ""
+        self._itc_ready_attempted = False
         self._archive_duplicate_mode = bool(getattr(itc_metadata, "is_true_duplicate", False))
         try:
             if not itc_metadata:
@@ -3835,7 +5768,21 @@ class CaseLawRouter:
             )
             self.handle_any_alert()
 
+            if self._itc_field_recovery_active and getattr(self, "_verified_duplicate_match", None):
+                return self.save_verified_duplicate(row_index)
+            if self._itc_field_failure_reason:
+                raise IRTFormRecoveryError(self._itc_field_failure_reason)
+
             if getattr(itc_metadata, "is_excluded", False) and self.is_locked_archive_excluded_form(context_label):
+                status_updates_buffer[row_index] = "ALREADY PROCESSED"
+                self.driver.close()
+                self.driver.switch_to.window(self.driver.window_handles[0])
+                return "ALREADY PROCESSED"
+
+            # IRT leaves the route control locked for an already completed
+            # document.  Detect that state before Source Detail, Case Name, or
+            # Comments are touched; a rerun must be read-only for those rows.
+            if self.is_route_locked_already_processed(context_label):
                 status_updates_buffer[row_index] = "ALREADY PROCESSED"
                 self.driver.close()
                 self.driver.switch_to.window(self.driver.window_handles[0])
@@ -3845,6 +5792,9 @@ class CaseLawRouter:
                 if row_index is not None:
                     status_updates_buffer[row_index] = f"SKIPPED: {context_label} FORM FILL ERROR"
                 return f"SKIPPED: {context_label} FORM FILL ERROR"
+
+            if self._itc_field_recovery_active and getattr(self, "_verified_duplicate_match", None):
+                return self.save_verified_duplicate(row_index)
 
             try:
                 comments_field = self.wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="comments"]')))
@@ -3884,7 +5834,12 @@ class CaseLawRouter:
                     or getattr(itc_metadata, "is_excluded", False)
                 ) else "Outside Conversion"
                 route_element = self.wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="route"]')))
-                if route_element.is_enabled():
+                if route_element.is_enabled() and self._itc_field_recovery_active:
+                    if not self.select_dropdown_by_visible_text_or_value('//*[@id="route"]', route_label, "Route"):
+                        raise IRTFormRecoveryError("ITC Route selection was not confirmed")
+                    if getattr(self, "_verified_duplicate_match", None):
+                        return self.save_verified_duplicate(row_index)
+                elif route_element.is_enabled():
                     route_element = WebDriverWait(self.driver, 3).until(EC.element_to_be_clickable((By.XPATH, '//*[@id="route"]')))
                     route_element.click()
                     self.handle_any_alert()
@@ -3919,8 +5874,11 @@ class CaseLawRouter:
                 self.driver.switch_to.window(self.driver.window_handles[0])
                 return "ROUTE ERROR"
 
+            self._itc_ready_attempted = True
             overlay_appeared = self.click_ready_checkbox_and_check_overlay(False)
             self.handle_any_alert()
+            if self._itc_field_recovery_active and getattr(self, "_verified_duplicate_match", None):
+                return self.save_verified_duplicate(row_index)
             if overlay_appeared == "ROUTE_ERROR":
                 self.driver.close()
                 self.driver.switch_to.window(self.driver.window_handles[0])
@@ -3930,12 +5888,18 @@ class CaseLawRouter:
                 self.driver.switch_to.window(self.driver.window_handles[0])
                 return "ALERT_HANDLED"
             if overlay_appeared == "READY_NOT_CLICKABLE":
+                if self._itc_field_recovery_active:
+                    status_updates_buffer[row_index] = f"ERROR: {context_label} READY TO PROCESS UNCONFIRMED"
+                    return status_updates_buffer[row_index]
                 logging.info("Ready to Process checkbox was not clickable for %s; marking document as ALREADY PROCESSED.", context_label)
                 status_updates_buffer[row_index] = "ALREADY PROCESSED"
                 self.driver.close()
                 self.driver.switch_to.window(self.driver.window_handles[0])
                 return "ALREADY PROCESSED"
 
+            if self._itc_field_recovery_active and not self.verify_itc_values_before_save(row, itc_metadata):
+                status_updates_buffer[row_index] = f"ERROR: {context_label} FORM VALUES UNCONFIRMED"
+                return status_updates_buffer[row_index]
             return self.handle_routing_and_save(False, row_index, skip_route_and_ready=True)
         except Exception as e:
             logging.error("Error filling %s IRT form: %s", context_label, e)
@@ -3944,44 +5908,39 @@ class CaseLawRouter:
             return "ERROR"
         finally:
             self._archive_duplicate_mode = previous_archive_duplicate_mode
+            self._itc_field_recovery_active = previous_recovery
+            self._itc_field_failure_reason = previous_failure
+            self._itc_ready_attempted = previous_ready_attempted
 
     def fill_irsplr_irt_form(self, row, row_index, irsplr_metadata: IRSPLRMetadata):
         """Fill an IRT form for IRSPLR using metadata extracted from the linked PDF."""
         try:
             if not irsplr_metadata:
-                logging.warning("Skipping IRSPLR row because extracted metadata is missing.")
-                if row_index is not None:
-                    status_updates_buffer[row_index] = "SKIPPED: IRSPLR PDF DATA NOT FOUND"
-                return "SKIPPED: IRSPLR PDF DATA NOT FOUND"
-
-            if getattr(irsplr_metadata, "is_text_fallback", False):
-                if self.is_irt_form_already_processed("IRSPLR"):
-                    status_updates_buffer[row_index] = "ALREADY PROCESSED"
-                    self.driver.close()
-                    self.driver.switch_to.window(self.driver.window_handles[0])
-                    return "ALREADY PROCESSED"
-
-                logging.warning(
-                    "IRSPLR PDF text could not be extracted and the IRT form is not already processed; OCR support is required."
+                return self.flag_irsplr_document_review(
+                    row, row_index, "UNREADABLE OR UNAVAILABLE - verified PDF metadata is missing; supply a working PDF",
                 )
-                if row_index is not None:
-                    status_updates_buffer[row_index] = "SKIPPED: IRSPLR OCR REQUIRED"
-                self.driver.close()
-                self.driver.switch_to.window(self.driver.window_handles[0])
-                return "SKIPPED: IRSPLR OCR REQUIRED"
+
+            verified_corrupt = bool(getattr(irsplr_metadata, "is_verified_corrupt", False))
+            if (getattr(irsplr_metadata, "is_text_fallback", False) or not irsplr_metadata.has_text_content) and not verified_corrupt:
+                return self.flag_irsplr_document_review(
+                    row, row_index, "UNREADABLE - a usable source PDF was not verified; supply a working PDF",
+                )
 
             file_name = str(row.get("FileName", "")).strip()
-            self.prepare_common_fields(
-                file_name,
-                decision_date=irsplr_metadata.decision_date,
-                dar_mode=False,
-                wc_mode=False,
-                docket_override=irsplr_metadata.docket_number,
-                court=irsplr_metadata.court,
-            )
+            if not verified_corrupt:
+                self.prepare_common_fields(
+                    file_name,
+                    decision_date=irsplr_metadata.decision_date,
+                    dar_mode=False,
+                    wc_mode=False,
+                    docket_override=irsplr_metadata.docket_number,
+                    court=irsplr_metadata.court,
+                )
+            else:
+                logging.info("Verified corrupt IRSPLR source: preserving existing docket/date/court; applying exclusion only.")
             self.handle_any_alert()
 
-            if getattr(irsplr_metadata, "is_excluded", False) and self.is_locked_archive_excluded_form("IRSPLR"):
+            if not verified_corrupt and getattr(irsplr_metadata, "is_excluded", False) and self.is_locked_archive_excluded_form("IRSPLR"):
                 status_updates_buffer[row_index] = "ALREADY PROCESSED"
                 self.driver.close()
                 self.driver.switch_to.window(self.driver.window_handles[0])
@@ -4072,13 +6031,33 @@ class CaseLawRouter:
                 self.driver.switch_to.window(self.driver.window_handles[0])
                 return "ALERT_HANDLED"
             if overlay_appeared == "READY_NOT_CLICKABLE":
+                if verified_corrupt:
+                    # Do not claim the required comment was saved merely
+                    # because this fresh exclusion form is non-interactable.
+                    status_updates_buffer[row_index] = "NON-INTERACTABLE IRT FORM"
+                    return "NON-INTERACTABLE IRT FORM"
                 logging.info("Ready to Process checkbox was not clickable for IRSPLR; marking document as ALREADY PROCESSED.")
                 status_updates_buffer[row_index] = "ALREADY PROCESSED"
                 self.driver.close()
                 self.driver.switch_to.window(self.driver.window_handles[0])
                 return "ALREADY PROCESSED"
 
-            return self.handle_routing_and_save(False, row_index, skip_route_and_ready=True)
+            if verified_corrupt:
+                configured = self.read_ready_locked_form()
+                if not isinstance(configured, dict) or not (
+                    configured.get("ready") is True
+                    and self.dropdown_text_matches(configured.get("source_detail"), "Excluded")
+                    and self.dropdown_text_matches(configured.get("route"), "Archive")
+                    and "Exclude - Corrupt File" in str(configured.get("comments") or "")
+                ):
+                    status_updates_buffer[row_index] = "ERROR: CORRUPT FILE EXCLUSION NOT CONFIRMED"
+                    logging.error("Corrupt exclusion source/route/comment/Ready state was not confirmed; not saving.")
+                    return "ERROR: CORRUPT FILE EXCLUSION NOT CONFIRMED"
+            result = self.handle_routing_and_save(False, row_index, skip_route_and_ready=True)
+            if verified_corrupt and result == "ALREADY PROCESSED":
+                status_updates_buffer[row_index] = "ERROR: CORRUPT FILE EXCLUSION SAVE UNCONFIRMED"
+                return "ERROR: CORRUPT FILE EXCLUSION SAVE UNCONFIRMED"
+            return result
         except Exception as e:
             logging.error(f"Error in fill_irsplr_irt_form(): {e}")
             if row_index is not None:
@@ -4841,6 +6820,8 @@ class CaseLawRouter:
 
             if not self.select_source_detail(itc_metadata.source_detail):
                 return False
+            if getattr(self, "_itc_field_recovery_active", False) and getattr(self, "_verified_duplicate_match", None):
+                return True
 
             comment_parts = []
             if itc_metadata.comments_text:
@@ -4997,7 +6978,10 @@ class CaseLawRouter:
         for attempt in range(1, 4):
             try:
                 self.handle_any_alert(timeout=1)
-                comments_field = WebDriverWait(self.driver, 10).until(
+                recover_itc = bool(getattr(self, "_itc_field_recovery_active", False))
+                if recover_itc and getattr(self, "_verified_duplicate_match", None):
+                    return True
+                comments_field = self.wait_for_itc_editable_control('//*[@id="comments"]') if recover_itc else WebDriverWait(self.driver, 10).until(
                     EC.presence_of_element_located((By.XPATH, '//*[@id="comments"]'))
                 )
                 if not comments_field.is_enabled() or comments_field.get_attribute("readonly") == "true":
@@ -5012,7 +6996,8 @@ class CaseLawRouter:
                 existing_text = comments_field.get_attribute("value").strip()
                 clean_parts = [
                     part for part in normalized_parts
-                    if part not in existing_text
+                    if (not re.search(r"(?<!\w)" + re.escape(part) + r"(?!\w)", self.normalize_irt_text(existing_text), re.I)
+                        if recover_itc else part not in existing_text)
                 ]
 
                 if not clean_parts:
@@ -5029,10 +7014,21 @@ class CaseLawRouter:
                 updated_text = self.normalize_irt_text(updated_text)
                 comments_field.clear()
                 comments_field.send_keys(updated_text)
+                if recover_itc:
+                    comments_field.send_keys(Keys.TAB)
+                    self.handle_any_alert(timeout=1)
+                    if getattr(self, "_verified_duplicate_match", None):
+                        return True
+                    fresh = self.wait_for_itc_editable_control('//*[@id="comments"]')
+                    actual = self.normalize_irt_text(fresh.get_attribute("value") or "").strip()
+                    if actual != updated_text:
+                        raise IRTFormRecoveryError("ITC Comments did not retain the requested text after alert handling")
                 logging.info(f"Updated {context_label} comments field: {updated_text}")
                 return True
-            except UnexpectedAlertPresentException:
-                self.handle_any_alert(timeout=3)
+            except UnexpectedAlertPresentException as exc:
+                self.handle_any_alert(timeout=3, initial_alert_text=getattr(exc, "alert_text", None))
+            except IRTFormRecoveryError:
+                raise
             except Exception as e:
                 if attempt < 3:
                     logging.warning(
@@ -5081,10 +7077,17 @@ class CaseLawRouter:
             logging.error(f"Error checking 'Ready to Process' checkbox state")
             return False
 
-    def handle_any_alert(self, timeout=3, archive_as_duplicate=None):
+    def handle_any_alert(self, timeout=3, archive_as_duplicate=None, initial_alert_text=None):
         handled_alert, duplicate_seen = self.accept_pending_alerts(initial_timeout=timeout)
+        duplicate_seen = duplicate_seen or "duplicate document" in str(initial_alert_text or "").lower()
         if duplicate_seen:
-            self.handle_duplicate_overlay(archive_as_duplicate=archive_as_duplicate)
+            if getattr(self, "_itc_field_recovery_active", False):
+                state = self.settle_irt_modify_transition(initial_alerts=["This is a duplicate document"])
+                if state != "EDITABLE" and not (state == "READY_LOCKED" and getattr(self, "_itc_ready_attempted", False)):
+                    self._itc_field_failure_reason = "ITC duplicate workflow did not restore a confirmed editable form"
+                    raise IRTFormRecoveryError(self._itc_field_failure_reason)
+            else:
+                self.handle_duplicate_overlay(archive_as_duplicate=archive_as_duplicate)
         return handled_alert
 
     def accept_pending_alerts(self, initial_timeout=3, followup_timeout=1, max_alerts=5):
@@ -5112,6 +7115,19 @@ class CaseLawRouter:
         return handled_alert, duplicate_seen
 
     def handle_routing_and_save(self, is_counsel, row_index, skip_route_and_ready=False):
+        if getattr(self, "_itc_duplicate_review_reason", ""):
+            status_updates_buffer[row_index] = "MANUAL REVIEW REQUIRED - ITC " + self._itc_duplicate_review_reason
+            return status_updates_buffer[row_index]
+        if getattr(self, "_itc_field_recovery_active", False) and getattr(self, "_itc_field_failure_reason", ""):
+            status_updates_buffer[row_index] = "ERROR: ITC DUPLICATE FORM RECOVERY FAILED"
+            return status_updates_buffer[row_index]
+        if getattr(self, "_irsplr_duplicate_review_reason", ""):
+            # Some legacy field/alert helpers catch dialog exceptions. This
+            # final gate must still prevent an unresolved comparison being saved.
+            return self.flag_irsplr_document_review(
+                getattr(self, "_active_duplicate_row", {"LNI": getattr(self, "_active_duplicate_lni", "")}),
+                row_index, self._irsplr_duplicate_review_reason,
+            )
         save_attempts = 3
         for attempt in range(save_attempts):
             try:
@@ -5211,7 +7227,7 @@ class CaseLawRouter:
         except Exception as e:
             logging.error(f"Unhandled error in submit_irt_form()")
 
-    def process_rows(self, full_df, file_path, update_progress, dar_mode=False, wc_mode=False, mspb_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
+    def process_rows(self, full_df, file_path, update_progress, dar_mode=False, wc_mode=False, mspb_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False, fcc_mode=False, ferc_mode=False, nlrb_mode=False):
         counsel_df, main_df = None, None
         try:
             self.full_df = full_df
@@ -5223,6 +7239,9 @@ class CaseLawRouter:
                 mnsutb_mode=mnsutb_mode,
                 mework_mode=mework_mode,
                 mosu00_mode=mosu00_mode,
+                fcc_mode=fcc_mode,
+                ferc_mode=ferc_mode,
+                nlrb_mode=nlrb_mode,
             )
 
             counsel_df, main_df = filter_mapping_data(full_df, dar_mode, wc_mode, mspb_mode=mspb_mode)
@@ -5247,13 +7266,58 @@ class CaseLawRouter:
                 logging.info("=== Starting ITC Batch ===")
                 if self.set_status:
                     self.set_status("ITC Batch Started")
-                itc_count, itc_duration = self.process_batch(main_df, full_df, file_path, update_progress, "itc", dar_mode, wc_mode)
+                itc_count, itc_duration = self.process_batch(main_df, full_df, file_path, update_progress, "itc", dar_mode, wc_mode, itc_mode=True)
                 if self.set_status:
                     self.set_status("ITC Batch Processed")
                 if itc_count > 0:
                     total_mins = int(itc_duration // 60)
                     total_secs = int(itc_duration % 60)
                     logging.info("[ITC PROCESSING SUMMARY] ITC: %d LNIs successfully routed in %dm %ds", itc_count, total_mins, total_secs)
+                return counsel_df, main_df
+
+            if fcc_mode:
+                counsel_df = full_df.iloc[0:0].copy()
+                main_df = full_df.copy()
+                logging.info("FCC Count: %d", len(main_df))
+                if self.set_status:
+                    self.set_status("FCC Batch Started")
+                fcc_count, fcc_duration = self.process_batch(
+                    main_df, full_df, file_path, update_progress, "fcc", dar_mode, wc_mode, fcc_mode=True
+                )
+                if self.set_status:
+                    self.set_status("FCC Batch Processed")
+                if fcc_count > 0:
+                    logging.info("[FCC PROCESSING SUMMARY] FCC: %d LNIs successfully routed in %dm %ds", fcc_count, int(fcc_duration // 60), int(fcc_duration % 60))
+                return counsel_df, main_df
+
+            if ferc_mode:
+                counsel_df = full_df.iloc[0:0].copy()
+                main_df = full_df.copy()
+                logging.info("FERC Count: %d", len(main_df))
+                if self.set_status:
+                    self.set_status("FERC Batch Started")
+                ferc_count, ferc_duration = self.process_batch(
+                    main_df, full_df, file_path, update_progress, "ferc", dar_mode, wc_mode, ferc_mode=True
+                )
+                if self.set_status:
+                    self.set_status("FERC Batch Processed")
+                if ferc_count > 0:
+                    logging.info("[FERC PROCESSING SUMMARY] FERC: %d LNIs successfully routed in %dm %ds", ferc_count, int(ferc_duration // 60), int(ferc_duration % 60))
+                return counsel_df, main_df
+
+            if nlrb_mode:
+                counsel_df = full_df.iloc[0:0].copy()
+                main_df = full_df.copy()
+                logging.info("NLRB Count: %d", len(main_df))
+                if self.set_status:
+                    self.set_status("NLRB Batch Started")
+                nlrb_count, nlrb_duration = self.process_batch(
+                    main_df, full_df, file_path, update_progress, "nlrb", dar_mode, wc_mode, nlrb_mode=True
+                )
+                if self.set_status:
+                    self.set_status("NLRB Batch Processed")
+                if nlrb_count > 0:
+                    logging.info("[NLRB PROCESSING SUMMARY] NLRB: %d LNIs successfully routed in %dm %ds", nlrb_count, int(nlrb_duration // 60), int(nlrb_duration % 60))
                 return counsel_df, main_df
 
             if irsplr_mode:
@@ -5539,6 +7603,9 @@ class CaseLawRouter:
         mnsutb_mode=False,
         mework_mode=False,
         mosu00_mode=False,
+        fcc_mode=False,
+        ferc_mode=False,
+        nlrb_mode=False,
     ):
         """Set duplicate-content verification policy for the active router mode.
 
@@ -5554,7 +7621,14 @@ class CaseLawRouter:
             mnsutb_mode,
             mework_mode,
             mosu00_mode,
+            fcc_mode,
+            ferc_mode,
+            nlrb_mode,
         ))
+        self._irsplr_duplicate_pdf_validation = bool(irsplr_mode)
+        self._irsplr_browser_first = bool(irsplr_mode)
+        self._itc_duplicate_verification = bool(itc_mode)
+        self._nlrb_form_recovery = bool(nlrb_mode)
         policy = "content verification enabled" if self._irt_duplicate_verification_enabled else "process-as-new only"
         logging.info("IRT duplicate policy for this run: %s", policy)
         return self._irt_duplicate_verification_enabled
@@ -5586,7 +7660,7 @@ class CaseLawRouter:
             logging.warning("Could not read LNI candidates from IRT duplicate dialog: %s", e)
         return candidates
 
-    def _fetch_irt_pdf_in_current_browser(self, href):
+    def _fetch_irt_pdf_in_current_browser(self, href, *, allow_non_pdf=False):
         """Fetch an IRT document through the authenticated browser session."""
         absolute_url = urljoin(self.driver.current_url, href)
         try:
@@ -5610,7 +7684,7 @@ class CaseLawRouter:
             )
             if result and result.get("ok") and result.get("body"):
                 content = base64.b64decode(result["body"])
-                if self.is_pdf_bytes(content):
+                if content and (allow_non_pdf or self.is_pdf_bytes(content)):
                     return content
             logging.warning(
                 "IRT document fetch did not return a PDF (status=%s) for %s.",
@@ -5645,8 +7719,14 @@ class CaseLawRouter:
         normalized_lni = str(lni or "").strip().upper()
         if not normalized_lni:
             return None
+        verify_pdf = bool(getattr(self, "_irsplr_duplicate_pdf_validation", False))
+        browser_first = verify_pdf and bool(getattr(self, "_irsplr_browser_first", False))
         if normalized_lni in self._duplicate_profile_cache:
-            return self._duplicate_profile_cache[normalized_lni]
+            cached = self._duplicate_profile_cache[normalized_lni]
+            if not verify_pdf or (getattr(cached, "is_verified_pdf", False) and (
+                not browser_first or getattr(cached, "is_browser_verified", False)
+            )):
+                return cached
 
         form_tab = self.driver.current_window_handle
         main_tab = getattr(self, "_main_tab", None)
@@ -5661,11 +7741,21 @@ class CaseLawRouter:
             if not href:
                 logging.warning("No document link was found while verifying duplicate LNI %s.", normalized_lni)
                 return None
-            pdf_bytes = self._fetch_irt_pdf_in_current_browser(href)
+            if browser_first:
+                try:
+                    self.inspect_irsplr_duplicate_in_browser(href)
+                except IRSPLRCorruptDocument as exc:
+                    # Never download/OCR a failed existing source to decide
+                    # whether it can disqualify a valid replacement.
+                    return IRTDocumentProfile(normalized_lni, "", "", is_verified_corrupt=True, validation_reason=str(exc))
+            pdf_bytes = self._fetch_irt_pdf_in_current_browser(href, allow_non_pdf=True) if verify_pdf else self._fetch_irt_pdf_in_current_browser(href)
             if not pdf_bytes:
                 return None
-            profile = build_document_profile(normalized_lni, pdf_bytes)
-            self._duplicate_profile_cache[normalized_lni] = profile
+            profile = build_document_profile(normalized_lni, pdf_bytes, verify_pdf=True) if verify_pdf else build_document_profile(normalized_lni, pdf_bytes)
+            if browser_first:
+                profile = replace(profile, is_browser_verified=True)
+            if not profile.is_verified_corrupt:
+                self._duplicate_profile_cache[normalized_lni] = profile
             logging.info("Captured IRT document content for duplicate comparison: %s", normalized_lni)
             return profile
         except Exception as e:
@@ -5680,25 +7770,64 @@ class CaseLawRouter:
         """Confirm whether an IRT duplicate candidate is the same document.
 
         This is deliberately invoked only after IRT itself raises a duplicate
-        alert.  A missing PDF, failed OCR, or ambiguous comparison is a false
-        positive for routing purposes and remains Process as New.
+        alert. PLR validates each source before comparing content. A confirmed
+        corrupt original cannot cause a valid replacement to be archived.
         """
+        verify_pdf = bool(getattr(self, "_irsplr_duplicate_pdf_validation", False))
+        verify_itc = bool(getattr(self, "_itc_duplicate_verification", False))
+
+        def require_review(reason):
+            if verify_pdf:
+                self._irsplr_duplicate_review_reason = "DUPLICATE COMPARISON - " + reason
+                logging.warning("IRSPLR %s", self._irsplr_duplicate_review_reason)
+            if verify_itc:
+                self._itc_duplicate_review_reason = "DUPLICATE COMPARISON - " + reason
+                logging.warning("ITC %s", self._itc_duplicate_review_reason)
+            return None
+
         current_lni = str(getattr(self, "_active_duplicate_lni", "") or "").strip().upper()
         candidate_lnis = self._visible_duplicate_candidate_lnis()
+        if (verify_pdf or verify_itc) and current_lni and not candidate_lnis:
+            try:
+                def candidates_after_alerts(_driver):
+                    self.accept_pending_alerts(initial_timeout=0.1, followup_timeout=0.2, max_alerts=5)
+                    return self._visible_duplicate_candidate_lnis()
+                candidate_lnis = WebDriverWait(self.driver, 10).until(candidates_after_alerts)
+            except TimeoutException:
+                pass
         if not current_lni or not candidate_lnis:
             logging.warning("IRT duplicate dialog has no usable current/candidate LNI; treating it as unconfirmed.")
-            return None
+            return require_review("the current or existing candidate LNI could not be confirmed; check the duplicate dialog")
 
         current_profile = self._document_profile_for_irt_lni(current_lni)
         if not current_profile:
-            logging.warning("Could not read current IRT document %s; duplicate will be processed as new.", current_lni)
-            return None
+            logging.warning("Could not read current IRT document %s for duplicate comparison.", current_lni)
+            return require_review("the incoming PDF could not be validated; supply a readable source PDF")
+        if current_profile.is_verified_corrupt:
+            if getattr(self, "_active_irsplr_corrupt_exclusion", False):
+                return None  # The incoming row is already being excluded, never normally routed.
+            return require_review("the incoming source is corrupt; it cannot be routed as a valid replacement")
+        if verify_pdf and not current_profile.is_verified_pdf:
+            return require_review("the incoming source has no verified PDF integrity result")
 
+        unresolved_lnis = []
+        inspected_candidates = 0
         for candidate_lni in candidate_lnis:
             if candidate_lni == current_lni:
                 continue
+            inspected_candidates += 1
             candidate_profile = self._document_profile_for_irt_lni(candidate_lni)
             if not candidate_profile:
+                unresolved_lnis.append(candidate_lni)
+                continue
+            if candidate_profile.is_verified_corrupt:
+                logging.info(
+                    "Existing duplicate candidate %s is verified corrupt (%s); it cannot disqualify valid incoming LNI %s. Continuing checks against any other candidates.",
+                    candidate_lni, candidate_profile.validation_reason, current_lni,
+                )
+                continue
+            if verify_pdf and not candidate_profile.is_verified_pdf:
+                unresolved_lnis.append(candidate_lni)
                 continue
             match = compare_document_profiles(current_profile, candidate_profile)
             logging.info(
@@ -5710,6 +7839,13 @@ class CaseLawRouter:
             )
             if match.is_match:
                 return match
+            if (verify_pdf or verify_itc) and match.method in {"text unavailable", "insufficient extracted text"}:
+                unresolved_lnis.append(candidate_lni)
+        if (verify_pdf or verify_itc) and (unresolved_lnis or not inspected_candidates):
+            return require_review(
+                "existing candidate(s) could not be validated/compared: " + ", ".join(unresolved_lnis or candidate_lnis)
+                + "; unavailable/OCR failures are not proof of corruption"
+            )
         return None
 
     def duplicate_status_label(self):
@@ -5740,13 +7876,22 @@ class CaseLawRouter:
 
     def handle_duplicate_overlay(self, archive_as_duplicate=None):
         """Choose Archive only after comparing IRT's current and candidate PDFs."""
-        if getattr(self, "_irt_duplicate_verification_enabled", True):
+        if getattr(self, "_irsplr_duplicate_pdf_validation", False) or getattr(self, "_itc_duplicate_verification", False):
+            self.accept_pending_alerts(initial_timeout=0.5, followup_timeout=1, max_alerts=5)
+        if getattr(self, "_active_irsplr_corrupt_exclusion", False):
+            verified_match = None
+            logging.info("Incoming PLR has a verified corrupt-file exclusion; duplicate UI cannot turn it into normal routing.")
+        elif getattr(self, "_irt_duplicate_verification_enabled", True):
             verified_match = self.verify_irt_duplicate_overlay()
         else:
             verified_match = None
             logging.info(
                 "IRT duplicate content verification is disabled for this SADM/DARA run; processing the alert as a new document."
             )
+        if getattr(self, "_irsplr_duplicate_review_reason", ""):
+            return False
+        if getattr(self, "_itc_duplicate_review_reason", ""):
+            return False
         archive_as_duplicate = verified_match is not None
         for attempt in range(1, 4):
             self.accept_pending_alerts(initial_timeout=0.5, followup_timeout=1, max_alerts=5)
@@ -6024,6 +8169,8 @@ class CaseLawRouter:
                 logging.error(f"Could not select dropdown option from '{element_id}'")
 
     def select_dropdown_by_visible_text_or_value(self, xpath, selection, field_name):
+        if getattr(self, "_itc_field_recovery_active", False):
+            return self.select_itc_dropdown_with_recovery(xpath, selection, field_name)
         try:
             dropdown_element = self.wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
             select = Select(dropdown_element)
@@ -6041,6 +8188,84 @@ class CaseLawRouter:
             return True
         except Exception as e:
             logging.error(f"Could not select {field_name}: {selection}")
+            return False
+
+    def wait_for_itc_editable_control(self, xpath, timeout=10):
+        """Ignore hidden duplicate IDs and re-find controls after IRT replaces them."""
+        def usable(driver):
+            for field in driver.find_elements(By.XPATH, xpath):
+                if field.is_displayed() and field.is_enabled() and field.get_attribute("readonly") not in ("true", "readonly"):
+                    return field
+            return False
+        return WebDriverWait(self.driver, timeout).until(usable)
+
+    def select_itc_dropdown_with_recovery(self, xpath, selection, field_name):
+        for attempt in range(1, 4):
+            try:
+                self.handle_any_alert(timeout=0.5)
+                if getattr(self, "_verified_duplicate_match", None):
+                    return True
+                field = self.wait_for_itc_editable_control(xpath)
+                if self.dropdown_text_matches(self.get_selected_dropdown_text(field), selection) or self.dropdown_text_matches(field.get_attribute("value"), selection):
+                    return True
+                dropdown = Select(field)
+                try:
+                    dropdown.select_by_visible_text(selection)
+                except NoSuchElementException:
+                    dropdown.select_by_value(selection)
+                # Selenium's native option click fires change itself. A second
+                # synthetic change can generate another duplicate warning.
+                self.handle_any_alert(timeout=1)
+                if getattr(self, "_verified_duplicate_match", None):
+                    return True
+                fresh = self.wait_for_itc_editable_control(xpath)
+                if self.dropdown_text_matches(self.get_selected_dropdown_text(fresh), selection) or self.dropdown_text_matches(fresh.get_attribute("value"), selection):
+                    logging.info("%s selected and verified: %s", field_name, selection)
+                    return True
+                raise IRTFormRecoveryError(f"{field_name} did not retain {selection!r}")
+            except UnexpectedAlertPresentException as exc:
+                self.handle_any_alert(timeout=1, initial_alert_text=getattr(exc, "alert_text", None))
+            except IRTFormRecoveryError as exc:
+                if getattr(self, "_itc_field_failure_reason", ""):
+                    raise
+                logging.warning("%s verification attempt %d/3 failed: %s", field_name, attempt, exc)
+            except Exception as exc:
+                self._raise_if_invalid_session_error(exc, f"selecting ITC {field_name}")
+                logging.warning("Could not select ITC %s on attempt %d/3: %s", field_name, attempt, exc)
+        logging.error("Could not select and verify ITC %s: %s", field_name, selection)
+        return False
+
+    def verify_itc_values_before_save(self, row, metadata):
+        """A resolved popup must not turn lost/reset form values into a saved DONE."""
+        if getattr(self, "_itc_field_failure_reason", ""):
+            return False
+        try:
+            saved = self.read_ready_locked_form()
+            docket_key = lambda value: re.sub(r"\s+", "", self.normalize_irt_text(value)).upper()
+            expected_route = "Archive" if (getattr(metadata, "is_excluded", False) or getattr(metadata, "is_true_duplicate", False)) else "Outside Conversion"
+            checks = {
+                "Docket Number": docket_key(saved.get("docket")) == docket_key(metadata.docket_number),
+                "Decision Date": self._saved_date_key(saved.get("decision_date")) == self._saved_date_key(metadata.decision_date),
+                "Source Detail": self.dropdown_text_matches(saved.get("source_detail"), resolve_source_detail(metadata.source_detail)),
+                "Route": self.dropdown_text_matches(saved.get("route"), expected_route),
+                "Ready to Process": saved.get("ready") is True,
+            }
+            comments = self.normalize_irt_text(saved.get("comments") or "")
+            for expected in (metadata.comments_text, row.get("Comments", "")):
+                if str(expected or "").strip().lower() in {"", "nan", "none"}:
+                    continue
+                checks["Comments"] = checks.get("Comments", True) and all(
+                    re.search(r"(?<!\w)" + re.escape(part.strip()) + r"(?!\w)", comments, re.I)
+                    for part in self.normalize_irt_text(expected).split(";") if part.strip()
+                )
+            failed = [label for label, valid in checks.items() if not valid]
+            if failed:
+                logging.error("ITC values not confirmed before Save: %s", ", ".join(failed))
+                return False
+            return True
+        except Exception as exc:
+            self._raise_if_invalid_session_error(exc, "verifying ITC fields before Save")
+            logging.error("Could not confirm ITC form values before Save: %s", exc)
             return False
 
     def get_selected_dropdown_text(self, dropdown_element):
@@ -6299,7 +8524,11 @@ class CaseLawRouter:
             return None
         if isinstance(value, (datetime.date, datetime.datetime)):
             return value.strftime("%m-%d-%Y")
-        return str(value).strip()
+        text = str(value).strip()
+        date_key = CaseLawRouter._saved_date_key(text)
+        if date_key:
+            return datetime.datetime.strptime(date_key, "%Y-%m-%d").strftime("%m-%d-%Y")
+        return text
 
     def find_main_opinion_date_for_counsel(self, counsel_docket, counsel_file_name, dar_mode=False, wc_mode=False, full_df=None):
         """Find the matched main opinion's mapping/filename date for a counsel document."""
@@ -6412,14 +8641,13 @@ class CaseLawRouter:
             except Exception as e:
                 logging.error(f"Error finding Source Detail dropdown")
 
-        # ✅ Now click the Related checkbox AFTER Source Detail
-        try:
-            self.click_element('//*[@id="related"]', wait_time=0)
-            # Selecting Related can itself raise IRT's duplicate alert.  Clear
-            # it before querying or filling the related-LNI controls.
-            self.handle_any_alert(timeout=3)
-        except Exception as e:
-            logging.error(f"Error ticking 'related' checkbox")
+        # IRT can reset Related while dismissing a duplicate dialog.  Do not
+        # attempt counsel attachment until the replacement controls are live.
+        if not self.ensure_related_lni_input_ready():
+            logging.error("Related checkbox or Related LNI field was not ready after duplicate handling.")
+            if row_index is not None:
+                status_updates_buffer[row_index] = "RELATED LNI FIELD LOCKED"
+            return "RELATED LNI FIELD LOCKED"
 
         # First handle the related and recycled counsel LNIs
         main_docket = CaseLawRouter.format_docket_number(None, row["FileName"], dar_mode, wc_mode)

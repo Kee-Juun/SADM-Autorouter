@@ -9,12 +9,12 @@ import getpass
 import random
 import math
 import time
-from PyQt5.QtGui import QMovie, QColor, QPen, QLinearGradient
-from PyQt5.QtCore import QThread, QPropertyAnimation, QPoint, QEasingCurve, QBasicTimer, QRect, QSize, QEvent, QTimer, QObject, QAbstractAnimation, pyqtProperty, QCoreApplication
+from PyQt5.QtGui import QMovie, QColor, QPen, QLinearGradient, QConicalGradient
+from PyQt5.QtCore import QThread, QPropertyAnimation, QParallelAnimationGroup, QSequentialAnimationGroup, QPoint, QEasingCurve, QBasicTimer, QRect, QSize, QEvent, QTimer, QObject, QAbstractAnimation, pyqtProperty, QCoreApplication
 from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import QGraphicsDropShadowEffect, QApplication, QWidget, QLabel, QPushButton, QProgressBar, \
     QVBoxLayout, QHBoxLayout, QCheckBox, QMessageBox, QSizePolicy, QMenu, QAction, QWidgetAction, QFrame, QMainWindow, \
-    QSpacerItem, QScrollArea, QPlainTextEdit, QGroupBox, QSpinBox, QComboBox
+    QSpacerItem, QScrollArea, QPlainTextEdit, QGroupBox, QSpinBox, QComboBox, QGridLayout
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFontDatabase, QFont, QPixmap, QPainter, QIcon, QBrush, QImage, QPainterPath
 from PyQt5.QtWidgets import QGraphicsOpacityEffect, QGraphicsBlurEffect
@@ -27,6 +27,7 @@ from core.smducar import (
 from core.smducar_workflow import run_automation_workflow
 from core.critical_error_notifier import notify_critical_error
 from core.rerun_status import finalize_rerun_ready_statuses
+from utils.router_usage import rank_router_groups, record_router_run
 import win32gui
 import win32con
 import pythoncom
@@ -113,6 +114,140 @@ FONTS_DIR = ASSETS_DIR / "fonts"
 CONFIG_DIR = Path(resource_path("config"))
 ICONS_DIR = ASSETS_DIR / "icons"
 BACKGROUND_LABEL_OBJECT_NAME = "AppBackgroundLabel"
+
+
+class ArcaneRouterCard(QPushButton):
+    """Router card with the Bulk Collector's ready-state neon border runner."""
+
+    def __init__(self, label, accent, parent=None):
+        super().__init__(label, parent)
+        self._accent = QColor(accent)
+        self._hovered = False
+        self._ready_border_angle = 0.0
+        self._ready_timer = QTimer(self)
+        # Match CyberPrimaryButton in SMD Bulk Collection Request Tool.
+        self._ready_timer.setInterval(38)
+        self._ready_timer.timeout.connect(self._advance_ready_border)
+        self.setAttribute(Qt.WA_Hover, True)
+
+    def enterEvent(self, event):
+        self._hovered = True
+        if self.isEnabled() and not self._ready_timer.isActive():
+            self._ready_timer.start()
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._ready_timer.stop()
+        self.update()
+        super().leaveEvent(event)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.EnabledChange:
+            if self.isEnabled() and self._hovered:
+                self._ready_timer.start()
+            else:
+                self._ready_timer.stop()
+            self.update()
+
+    def _advance_ready_border(self):
+        self._ready_border_angle = (self._ready_border_angle + 4.0) % 360.0
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._hovered or not self.isEnabled():
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+        runner_rect = rect.adjusted(1.5, 1.5, -1.5, -1.5)
+        runner_path = QPainterPath()
+        runner_path.addRoundedRect(runner_rect, 7, 7)
+
+        # Deliberately identical palette, gradient stops, pen widths, and
+        # rotation cadence to the Bulk Collector Generate-button indicator.
+        glow = QConicalGradient(runner_rect.center(), -self._ready_border_angle)
+        glow.setColorAt(0.00, QColor(42, 255, 244, 0))
+        glow.setColorAt(0.06, QColor(42, 255, 244, 210))
+        glow.setColorAt(0.10, QColor(255, 255, 255, 245))
+        glow.setColorAt(0.15, QColor(255, 45, 248, 220))
+        glow.setColorAt(0.24, QColor(255, 45, 248, 0))
+        glow.setColorAt(1.00, QColor(42, 255, 244, 0))
+
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QBrush(glow), 6.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(runner_path)
+        painter.setPen(QPen(QBrush(glow), 2.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(runner_path)
+        painter.end()
+
+
+class RouterSwitchEffect(QWidget):
+    """A single lap of the Codex card's live neon border runner."""
+
+    _STEP_DEGREES = 4.0
+    _FRAME_INTERVAL_MS = 38
+    _FULL_LAP_STEPS = int(360 / _STEP_DEGREES)
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self._border_angle = 0.0
+        self._steps_remaining = 0
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self._lap_timer = QTimer(self)
+        self._lap_timer.setInterval(self._FRAME_INTERVAL_MS)
+        self._lap_timer.timeout.connect(self._advance_lap)
+        self.hide()
+
+    def play(self, _accent=None):
+        """Start one complete 360° cycle using the exact Codex-hover runner."""
+        parent = self.parentWidget()
+        self._lap_timer.stop()
+        self._border_angle = 0.0
+        self._steps_remaining = self._FULL_LAP_STEPS
+        self.setGeometry(0, 0, parent.width(), parent.height())
+        self.show()
+        self.raise_()
+        self.update()
+        self._lap_timer.start()
+
+    def _advance_lap(self):
+        self._border_angle = (self._border_angle + self._STEP_DEGREES) % 360.0
+        self._steps_remaining -= 1
+        self.update()
+        if self._steps_remaining <= 0:
+            self._lap_timer.stop()
+            self.hide()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+        runner_rect = rect.adjusted(1.5, 1.5, -1.5, -1.5)
+        runner_path = QPainterPath()
+        runner_path.addRoundedRect(runner_rect, 11, 11)
+
+        # Same cyan-white-magenta runner drawn by ArcaneRouterCard on hover.
+        glow = QConicalGradient(runner_rect.center(), -self._border_angle)
+        glow.setColorAt(0.00, QColor(42, 255, 244, 0))
+        glow.setColorAt(0.06, QColor(42, 255, 244, 210))
+        glow.setColorAt(0.10, QColor(255, 255, 255, 245))
+        glow.setColorAt(0.15, QColor(255, 45, 248, 220))
+        glow.setColorAt(0.24, QColor(255, 45, 248, 0))
+        glow.setColorAt(1.00, QColor(42, 255, 244, 0))
+
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QBrush(glow), 6.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(runner_path)
+        painter.setPen(QPen(QBrush(glow), 2.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(runner_path)
+        painter.end()
+
 
 # Keep the avatar smaller than its container so the Silcrow GIF and equipped
 # achievement badges have room for bounce frames, shadows, and glitch overlays.
@@ -224,7 +359,7 @@ class SMDUSAPGui(QMainWindow):
     progress_signal = pyqtSignal(str, int, int)  # batch, current, total
     status_signal = pyqtSignal(str)
     router_mode_signal = pyqtSignal(str, str)
-    final_success_signal = pyqtSignal(str, int, int, int, int, int, int)
+    final_success_signal = pyqtSignal(str, int, int, int, int, int, int, object)
     error_signal = pyqtSignal(str)
 
     def apply_frosted_glass_background(self):
@@ -693,6 +828,7 @@ class SMDUSAPGui(QMainWindow):
 
         font_targets = (
             ("mode_combo", 13, QFont.DemiBold),
+            ("router_codex_btn", 11, QFont.DemiBold),
             ("generate_btn", 12, QFont.Bold),
             ("run_btn", 12, QFont.Bold),
             ("level_triangle_btn", 16, QFont.Bold),
@@ -708,6 +844,8 @@ class SMDUSAPGui(QMainWindow):
             widget = getattr(self, attr, None)
             if widget:
                 widget.setFont(self._active_ui_font(size, weight))
+
+        self._refresh_router_codex_button()
 
         settings_menu = getattr(self, "settings_menu", None)
         if settings_menu:
@@ -765,13 +903,16 @@ class SMDUSAPGui(QMainWindow):
         self._sync_run_buttons()
 
         mode_combo = getattr(self, "mode_combo", None)
-        if mode_combo:
-            mode_combo.setEnabled(not running)
-            mode_combo.setCursor(Qt.ArrowCursor if running else Qt.PointingHandCursor)
-            mode_combo.setToolTip(
+        router_codex_btn = getattr(self, "router_codex_btn", None)
+        for selector in (mode_combo, router_codex_btn):
+            if not selector:
+                continue
+            selector.setEnabled(not running)
+            selector.setCursor(Qt.ArrowCursor if running else Qt.PointingHandCursor)
+            selector.setToolTip(
                 "Router mode is locked while automation is running."
                 if running
-                else "Select which autorouter mode to run."
+                else "Open the Router Codex."
             )
         self._update_parallel_router_controls()
 
@@ -787,7 +928,317 @@ class SMDUSAPGui(QMainWindow):
             ("mnsutb", "MNSUTB Autorouter"),
             ("mework", "MEWORK Autorouter"),
             ("mosu00", "MOSU Autorouter"),
+            ("fcc", "FCC Autorouter"),
+            ("ferc", "FERC Autorouter"),
+            ("nlrb", "NLRB Autorouter"),
         ]
+
+    def get_router_codex_groups(self):
+        """Grouped visual layout for the picker; mode keys remain unchanged."""
+        labels = dict(self.get_mode_options())
+        groups = (
+            ("APPEALS", ("smd", "dar")),
+            ("FEDERAL", ("fcc", "ferc", "nlrb", "itc", "irsplr", "mspb")),
+            ("STATE", ("ohtax0", "mnsutb", "mework", "mosu00")),
+        )
+        return rank_router_groups(groups), labels
+
+    def _mode_codex_accent(self, mode):
+        accents = {
+            "fcc": "#67E8F9", "ferc": "#38BDF8", "nlrb": "#22D3EE", "itc": "#A78BFA", "irsplr": "#FDE68A",
+            "mspb": "#5EEAD4", "ohtax0": "#FBBF24", "mnsutb": "#60A5FA",
+            "mework": "#34D399", "mosu00": "#FB7185", "smd": "#C4B5FD", "dar": "#F0ABFC",
+        }
+        return accents.get(mode, "#67E8F9")
+
+    def _refresh_router_codex_button(self):
+        button = getattr(self, "router_codex_btn", None)
+        if not button:
+            return
+        mode = self.get_current_mode()
+        label = dict(self.get_mode_options()).get(mode, "Choose Autorouter")
+        accent = self._mode_codex_accent(mode)
+        # Keep the title bar focused on the selected router.  Its width follows
+        # the current display font, so long router names are never clipped.
+        button.setText(label)
+        text_width = button.fontMetrics().horizontalAdvance(label)
+        button.setFixedWidth(max(170, min(280, text_width + 36)))
+        button.setStyleSheet(f"""
+            QPushButton {{
+                color: rgba(255, 255, 255, 0.97);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(9, 42, 55, 0.90), stop:1 rgba(36, 23, 74, 0.92));
+                border: 1px solid {accent}; border-radius: 13px;
+                padding: 7px 13px; text-align: center;
+            }}
+            QPushButton:hover {{ background: rgba(42, 88, 116, 0.94); border: 1px solid #FFFFFF; }}
+            QPushButton:disabled {{ color: rgba(255,255,255,0.45); border-color: rgba(255,255,255,0.16); }}
+        """)
+
+    def open_router_codex(self):
+        if getattr(self, "is_running", False):
+            return
+
+        existing = getattr(self, "_router_codex_dialog", None)
+        if existing and existing.isVisible():
+            if getattr(existing, "_router_codex_closing", False):
+                return
+            self._animate_router_codex_close(existing)
+            return
+
+        # This must be an independent tool window, not an owned QDialog. On
+        # Windows an owned dialog is forced above its owner, which makes it
+        # visibly travel across the main window instead of behind it.
+        dialog = QDialog()
+        dialog.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)
+        dialog.setAttribute(Qt.WA_TranslucentBackground, True)
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.NonModal)
+        dialog.setWindowOpacity(0.95)
+        dialog.setFixedSize(368, 430)
+        dialog.setStyleSheet("QDialog { background: transparent; }")
+
+        # A painted inner surface gives the frameless dialog clean rounded
+        # corners while preserving just a hint of the app art behind it.
+        outer_layout = QVBoxLayout(dialog)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        surface = QFrame(dialog)
+        surface.setObjectName("router_codex_surface")
+        surface.setStyleSheet("""
+            QFrame#router_codex_surface {
+                background-color: #0B2635;
+                border: 1px solid #67E8F9;
+                border-radius: 18px;
+            }
+            QLabel { background: transparent; }
+        """)
+        outer_layout.addWidget(surface)
+
+        layout = QVBoxLayout(surface)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(8)
+
+        header = QWidget(surface)
+        header_layout = QGridLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setHorizontalSpacing(0)
+        header_layout.setColumnMinimumWidth(0, 28)
+        header_layout.setColumnMinimumWidth(2, 28)
+
+        title = QLabel("ROUTER CODEX")
+        title.setFont(self._active_ui_font(16, QFont.Bold))
+        title.setStyleSheet("color: #E8FDFF; letter-spacing: 1px;")
+        title.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(title, 0, 1)
+
+        chevron_pixmap = QPixmap(16, 16)
+        chevron_pixmap.fill(Qt.transparent)
+        chevron_painter = QPainter(chevron_pixmap)
+        chevron_painter.setRenderHint(QPainter.Antialiasing)
+        chevron_pen = QPen(QColor("#B6F3FA"))
+        chevron_pen.setWidthF(2.2)
+        chevron_pen.setCapStyle(Qt.RoundCap)
+        chevron_pen.setJoinStyle(Qt.RoundJoin)
+        chevron_painter.setPen(chevron_pen)
+        chevron_painter.drawLine(QPoint(5, 3), QPoint(11, 8))
+        chevron_painter.drawLine(QPoint(11, 8), QPoint(5, 13))
+        chevron_painter.end()
+
+        close_button = QPushButton(header)
+        close_button.setFixedSize(28, 28)
+        close_button.setIcon(QIcon(chevron_pixmap))
+        close_button.setIconSize(QSize(16, 16))
+        close_button.setCursor(Qt.PointingHandCursor)
+        close_button.setToolTip("Close Router Codex")
+        close_button.setStyleSheet("""
+            QPushButton { background: transparent; border: none; padding: 0; }
+            QPushButton:hover { background: rgba(103,232,249,0.18); border-radius: 10px; }
+        """)
+        close_button.clicked.connect(lambda: self._animate_router_codex_close(dialog))
+        header_layout.addWidget(close_button, 0, 2, Qt.AlignRight)
+        layout.addWidget(header)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("""
+            QScrollArea, QScrollArea::viewport { background: transparent; }
+            QScrollBar:vertical { width: 12px; margin: 4px 0; background: rgba(103,232,249,0.12); border-radius: 6px; }
+            QScrollBar::handle:vertical { min-height: 54px; margin: 1px; background: rgba(103,232,249,0.70); border-radius: 5px; }
+            QScrollBar::handle:vertical:hover { background: rgba(165,243,252,0.92); }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; background: transparent; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+        """)
+        content = QWidget()
+        content.setStyleSheet("background: transparent;")
+        content_layout = QVBoxLayout(content)
+        # Reserve a deliberate gutter beside the scroll rail so cards never
+        # visually crowd the thumb, even when the panel needs to scroll.
+        content_layout.setContentsMargins(0, 2, 14, 2)
+        content_layout.setSpacing(10)
+
+        groups, labels = self.get_router_codex_groups()
+        selected_mode = self.get_current_mode()
+        for group_label, mode_keys in groups:
+            heading = QLabel(group_label)
+            heading.setFont(self._active_ui_font(8, QFont.Bold))
+            heading.setStyleSheet("color: rgba(140, 226, 245, 0.70);")
+            heading.setAlignment(Qt.AlignCenter)
+            content_layout.addWidget(heading)
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(8)
+            grid.setVerticalSpacing(8)
+            for index, mode in enumerate(mode_keys):
+                selected = mode == selected_mode
+                accent = self._mode_codex_accent(mode)
+                short_label = labels[mode].replace(" Autorouter", "").replace(" Autoruter", "")
+                card = ArcaneRouterCard(short_label, accent, content)
+                card.setFont(self._active_ui_font(10, QFont.Bold))
+                card.setFixedHeight(40)
+                card.setCursor(Qt.PointingHandCursor)
+                card.setToolTip(f"Switch to {labels[mode]}")
+                card.setStyleSheet(f"""
+                    QPushButton {{ color: #F3FDFF; text-align: center; padding: 6px 10px;
+                        background: {'rgba(35, 113, 133, 0.72)' if selected else 'rgba(255,255,255,0.07)'};
+                        border: {'2px solid ' + accent if selected else '1px solid rgba(255,255,255,0.16)'};
+                        border-radius: 10px; }}
+                    QPushButton:hover {{ background: rgba(55, 131, 150, 0.62); border: 1px solid {accent}; }}
+                """)
+                card.clicked.connect(lambda _checked=False, choice=mode: self._choose_router_codex_mode(dialog, choice))
+                grid.addWidget(card, index // 2, index % 2)
+            content_layout.addLayout(grid)
+        content_layout.addStretch()
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+
+        self._router_codex_dialog = dialog
+        dialog.finished.connect(lambda _code, panel=dialog: self._clear_router_codex_dialog(panel))
+        self._animate_router_codex_open(dialog)
+
+    def _clear_router_codex_dialog(self, dialog):
+        if getattr(self, "_router_codex_dialog", None) is dialog:
+            self._router_codex_dialog = None
+        dialog.deleteLater()
+
+    def _router_codex_target_position(self, dialog):
+        """Return the screen position beside the main window for a codex panel."""
+        host_rect = self.frameGeometry()
+        screen = QApplication.screenAt(host_rect.center()) or QApplication.primaryScreen()
+        gap = 12
+        target_x = host_rect.left() - dialog.width() - gap
+        target_y = host_rect.top() + (host_rect.height() - dialog.height()) // 2
+        if screen:
+            available = screen.availableGeometry()
+            if target_x < available.left():
+                target_x = min(host_rect.right() + gap + 1, available.right() - dialog.width() + 1)
+            target_x = max(available.left(), min(target_x, available.right() - dialog.width() + 1))
+            target_y = max(available.top(), min(target_y, available.bottom() - dialog.height() + 1))
+        return QPoint(target_x, target_y)
+
+    def _router_codex_hidden_position(self, dialog, target_position):
+        """Place the panel mostly behind the main window before drawer motion."""
+        host_rect = self.frameGeometry()
+        # When the panel lives left of the app, it emerges from the app's left
+        # edge.  When edge safety flips it to the right, use the right edge.
+        if target_position.x() < host_rect.left():
+            x = host_rect.left() + 22
+        else:
+            x = host_rect.right() - 22
+        return QPoint(x, target_position.y())
+
+    def _animate_router_codex_open(self, dialog):
+        target_position = self._router_codex_target_position(dialog)
+        hidden_position = self._router_codex_hidden_position(dialog, target_position)
+        dialog._router_codex_animating = True
+        # The drawer remains slightly recessed while it is in motion. Its
+        # normal stained-glass opacity returns only after it docks.
+        dialog.setWindowOpacity(0.70)
+        dialog.move(hidden_position)
+        dialog.show()
+        # Keep this companion specifically beneath its parent window.  Unlike
+        # lower(), stackUnder() preserves its normal desktop z-order, so the
+        # panel is revealed only as it slides out past the parent edge.
+        dialog.stackUnder(self)
+        self.raise_()
+
+        # The panel is physically covered by the main window until it clears
+        # the edge, creating a native drawer motion without a reveal effect.
+        slide_animation = QPropertyAnimation(dialog, b"pos", dialog)
+        slide_animation.setDuration(520)
+        slide_animation.setStartValue(hidden_position)
+        slide_animation.setEndValue(target_position)
+        slide_animation.setEasingCurve(QEasingCurve.OutCubic)
+
+        settle_opacity = QPropertyAnimation(dialog, b"windowOpacity", dialog)
+        settle_opacity.setDuration(140)
+        settle_opacity.setStartValue(0.70)
+        settle_opacity.setEndValue(0.95)
+        settle_opacity.setEasingCurve(QEasingCurve.OutQuad)
+
+        animation = QSequentialAnimationGroup(dialog)
+        animation.addAnimation(slide_animation)
+        animation.addAnimation(settle_opacity)
+
+        def finish_open():
+            dialog._router_codex_animating = False
+            self._position_router_codex(dialog)
+
+        def start_open_animation():
+            # Let Windows paint the transparent start state first. Starting
+            # immediately after show() can collapse the whole transition into
+            # a single composited frame on a top-level frameless dialog.
+            if dialog.isVisible() and not getattr(dialog, "_router_codex_closing", False):
+                animation.start()
+
+        animation.finished.connect(finish_open)
+        dialog._router_codex_animation = animation
+        QTimer.singleShot(16, start_open_animation)
+
+    def _animate_router_codex_close(self, dialog):
+        if not dialog or getattr(dialog, "_router_codex_closing", False):
+            return
+        dialog._router_codex_closing = True
+        dialog._router_codex_animating = True
+        dialog.setEnabled(False)
+        # Dim first so the Codex visibly recedes before it passes behind the
+        # main window. It stays dim for the entire return journey.
+        dialog.setWindowOpacity(0.70)
+        dialog.stackUnder(self)
+        self.raise_()
+        target_position = self._router_codex_target_position(dialog)
+        hidden_position = self._router_codex_hidden_position(dialog, target_position)
+
+        animation = QPropertyAnimation(dialog, b"pos", dialog)
+        animation.setDuration(520)
+        animation.setStartValue(dialog.pos())
+        animation.setEndValue(hidden_position)
+        animation.setEasingCurve(QEasingCurve.InCubic)
+        animation.finished.connect(dialog.reject)
+        dialog._router_codex_animation = animation
+        animation.start()
+
+    def _position_router_codex(self, dialog=None):
+        """Keep the non-modal Router Codex docked beside the main window."""
+        dialog = dialog or getattr(self, "_router_codex_dialog", None)
+        if not dialog or getattr(dialog, "_router_codex_animating", False):
+            return
+        dialog.move(self._router_codex_target_position(dialog))
+
+    def _choose_router_codex_mode(self, dialog, mode):
+        self.set_router_mode(mode, source="router codex")
+        self._play_router_switch_effect(mode)
+        self._animate_router_codex_close(dialog)
+
+    def _play_router_switch_effect(self, mode):
+        """Play the contained mechanical/magical transfer on the title pill."""
+        button = getattr(self, "router_codex_btn", None)
+        if not button:
+            return
+        effect = getattr(self, "_router_switch_effect", None)
+        if effect is None:
+            effect = RouterSwitchEffect(button)
+            self._router_switch_effect = effect
+        effect.play(self._mode_codex_accent(mode))
 
     def get_current_mode(self):
         return self.config.get("mode", "dar" if self.config.get("dar_mode", False) else "smd")
@@ -813,6 +1264,7 @@ class SMDUSAPGui(QMainWindow):
                     mode_combo.setCurrentIndex(index)
             finally:
                 mode_combo.blockSignals(previous_block_state)
+        self._refresh_router_codex_button()
 
     def _set_router_mode_config(self, mode):
         """Update router mode config without touching Qt widgets."""
@@ -944,6 +1396,15 @@ class SMDUSAPGui(QMainWindow):
         if current_mode == "mosu00":
             logging.info("Returning MOSU Autorouter")
             return "MOSU Autorouter"
+        if current_mode == "fcc":
+            logging.info("Returning FCC Autorouter")
+            return "FCC Autorouter"
+        if current_mode == "ferc":
+            logging.info("Returning FERC Autorouter")
+            return "FERC Autorouter"
+        if current_mode == "nlrb":
+            logging.info("Returning NLRB Autorouter")
+            return "NLRB Autorouter"
         if current_mode == "dar":
             logging.info("Returning DAR Autoruter")
             return "DAR Autoruter"
@@ -968,41 +1429,69 @@ class SMDUSAPGui(QMainWindow):
             return "MEWORK Documents Auto-Routed"
         if current_mode == "mosu00":
             return "MOSU Documents Auto-Routed"
+        if current_mode == "fcc":
+            return "FCC Documents Auto-Routed"
+        if current_mode == "ferc":
+            return "FERC Documents Auto-Routed"
+        if current_mode == "nlrb":
+            return "NLRB Documents Auto-Routed"
         if current_mode == "dar":
             return "DAR Documents Auto-Routed"
         return "SMD USAP Documents Auto-Routed"
 
     def auto_detect_mode_from_filenames(self, df):
-        """Auto-detect mode from filenames in the Excel data"""
+        """Inspect filename patterns without overriding the chosen router.
+
+        The Router Codex is an explicit user choice.  Some court-specific
+        filenames also happen to match another router's legacy filename
+        pattern (notably OHTAX0 files looking like IRSPLR files), so changing
+        the configured mode at run time can send a valid batch to the wrong
+        workflow.  Detection remains useful for diagnostics, but is advisory
+        only.
+        """
         try:
             from core.smducar import detect_mode
             
             # Count modes in the filenames
-            mode_counts = {"smd": 0, "dar": 0, "mspb": 0, "itc": 0, "irsplr": 0, "ohtax0": 0, "mnsutb": 0, "mework": 0, "mosu00": 0, "unknown": 0}
+            mode_counts = {"smd": 0, "dar": 0, "mspb": 0, "itc": 0, "irsplr": 0, "ohtax0": 0, "mnsutb": 0, "mework": 0, "mosu00": 0, "fcc": 0, "ferc": 0, "nlrb": 0, "unknown": 0}
             
             for _, row in df.iterrows():
                 filename = str(row.get("FileName", "")).strip()
                 if filename and filename.lower() != "nan":
                     court_code = str(row.get("CourtCode", row.get("Court Code", ""))).strip().upper()
-                    detected_mode = "mework" if court_code == "STMEWORK" else detect_mode(filename)
+                    detected_mode = "nlrb" if court_code == "FDNLRB00" else "ferc" if court_code == "FDFERC00" else "fcc" if court_code == "FDFCC000" else "mework" if court_code == "STMEWORK" else detect_mode(filename)
                     mode_counts[detected_mode] = mode_counts.get(detected_mode, 0) + 1
             
             # Determine the most common mode
             most_common_mode = max(mode_counts, key=mode_counts.get)
             
-            # Only auto-detect if we have a clear majority
+            # A clear majority is useful context, but never changes the
+            # manually selected Codex mode.  The selected mode is the
+            # contract for this run.
             total_files = sum(mode_counts.values())
             if total_files > 0 and mode_counts[most_common_mode] > total_files * 0.5:
                 current_mode = self.config.get("mode", "dar" if self.config.get("dar_mode", False) else "smd")
                 target_mode = most_common_mode
-                if most_common_mode in {"dar", "smd", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mework", "mosu00"} and target_mode != current_mode:
-                    self._set_router_mode_config(target_mode)
-                    self.router_mode_signal.emit(target_mode, "auto-detection")
-                    logging.info(f"Auto-detected {most_common_mode.upper()} mode from {mode_counts[most_common_mode]}/{total_files} files")
+                if most_common_mode in {"dar", "smd", "mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mework", "mosu00", "fcc", "ferc", "nlrb"} and target_mode != current_mode:
+                    logging.info(
+                        "Filename detection suggests %s for %d/%d file(s), but retaining the user-selected %s mode.",
+                        most_common_mode.upper(),
+                        mode_counts[most_common_mode],
+                        total_files,
+                        current_mode.upper(),
+                    )
+                else:
+                    logging.info(
+                        "Filename detection agrees with selected %s mode for %d/%d file(s).",
+                        current_mode.upper(),
+                        mode_counts[most_common_mode],
+                        total_files,
+                    )
         except Exception as e:
             logging.warning(f"Error auto-detecting mode: {e}")
 
-    def get_success_message(self, user_name, counsel_success, main_success, counsel_already, main_already, error_log_entries=None, counsel_timeout=0, main_timeout=0):
+    def get_success_message(self, user_name, counsel_success, main_success, counsel_already, main_already,
+                            error_log_entries=None, counsel_timeout=0, main_timeout=0, review_summary=None):
         """Get the appropriate success message based on current mode, with simplified readable layout."""
         current_mode = self.config.get("mode", "dar" if self.config.get("dar_mode", False) else "smd")
         
@@ -1027,6 +1516,15 @@ class SMDUSAPGui(QMainWindow):
         elif current_mode == "mosu00":
             app_name = "MOSU"
             process_name = "MOSU"
+        elif current_mode == "fcc":
+            app_name = "FCC"
+            process_name = "FCC"
+        elif current_mode == "ferc":
+            app_name = "FERC"
+            process_name = "FERC"
+        elif current_mode == "nlrb":
+            app_name = "NLRB"
+            process_name = "NLRB"
         elif current_mode == "dar":
             app_name = "DAR"
             process_name = "DAR"
@@ -1040,13 +1538,56 @@ class SMDUSAPGui(QMainWindow):
         total_success = (counsel_success or 0) + (main_success or 0)
         total_already = (counsel_already or 0) + (main_already or 0)
         num_errors = len(error_log_entries) if error_log_entries else 0
+        needs_rerun_count = int((review_summary or {}).get("needs_rerun_count", 0) or 0)
+        rerun_rows = (review_summary or {}).get("rerun_rows") or []
 
         def summary_closer():
+            if needs_rerun_count:
+                return f"{needs_rerun_count} document(s) still need a rerun. Check the mapping sheet and run log."
+            if manual_review_count:
+                return f"{manual_review_count} document(s) need manual review. Check the reasons listed above."
             if total_success > 0 and total_already > 0:
                 return f"New routing finished; already handled rows were skipped, {user_name}!"
             if total_success > 0:
                 return f"Fresh routing complete, {user_name}!"
             return f"No new routing needed, {user_name}!"
+
+        manual_review_count = int((review_summary or {}).get("manual_review_count", 0) or 0)
+        manual_review_rows = (review_summary or {}).get("manual_review_rows") or []
+        date_updated_count = int((review_summary or {}).get("decision_date_updated_count", 0) or 0)
+
+        def finish(lines):
+            if date_updated_count:
+                insert_at = len(lines) - 1 if lines and lines[-1] == summary_closer() else len(lines)
+                lines[insert_at:insert_at] = ["", f"Decision dates updated: {date_updated_count}", "Only Decision Date was changed on these processed records."]
+            if needs_rerun_count and (total_success or total_already):
+                rerun_lines = ["", "Rerun required:", f"Documents needing rerun: {needs_rerun_count}"]
+                insert_at = len(lines) - 1 if lines and lines[-1] == summary_closer() else len(lines)
+                lines[insert_at:insert_at] = rerun_lines
+            if manual_review_count:
+                review_lines = [
+                    "",
+                    "Manual review required:",
+                    f"{manual_review_count} document(s) were skipped safely; no IRT changes were made.",
+                ]
+                for entry in manual_review_rows[:5]:
+                    filename = entry.get("File Name") or "Unknown file"
+                    lni = entry.get("LNI") or "N/A"
+                    status = entry.get("Status") or "NEEDS REVIEW"
+                    review_lines.append(f"• {filename} - {lni} ({status})")
+                extra_count = max(0, len(manual_review_rows) - 5)
+                if extra_count:
+                    review_lines.append(f"• ...and {extra_count} more document(s).")
+                insert_at = len(lines) - 1 if lines and lines[-1] == summary_closer() else len(lines)
+                lines[insert_at:insert_at] = review_lines
+            return "\n".join(lines)
+
+        if needs_rerun_count and total_success == 0 and total_already == 0:
+            lines = [f"{app_name} Auto-Routing Summary:", "", "Run could not complete."]
+            for entry in rerun_rows[:10]:
+                lines.append(f"• {entry.get('File Name') or 'Unknown file'} - {entry.get('LNI') or 'N/A'} ({entry.get('Status') or 'NEEDS RERUN'})")
+            lines.extend(["", summary_closer()])
+            return finish(lines)
 
         if num_errors > 0 and total_success == 0 and total_already == 0:
             lines = [f"{app_name} Auto-Routing Summary:", "", "Errors:"]
@@ -1062,13 +1603,13 @@ class SMDUSAPGui(QMainWindow):
                 lines.append(f"...and {remaining} other documents.")
             lines.append("")
             lines.append("It's okay. Check and try again.")
-            return "\n".join(lines)
+            return finish(lines)
 
         if total_success == 0 and total_already == 0:
-            return "\n".join([
+            return finish([
                 f"{app_name} Auto-Routing Summary:",
                 "",
-                "No unfinished rows found for this run.",
+                "No documents were routed; manual review is required." if manual_review_count else "No unfinished rows found for this run.",
                 "",
                 summary_closer(),
             ])
@@ -1085,7 +1626,7 @@ class SMDUSAPGui(QMainWindow):
             lines.append(f"MSPB: {main_already}")
             lines.append("")
             lines.append(summary_closer())
-            return "\n".join(lines)
+            return finish(lines)
 
         if current_mode == "mework":
             lines = [f"{app_name} Auto-Routing Summary:"]
@@ -1095,7 +1636,7 @@ class SMDUSAPGui(QMainWindow):
             if (main_timeout or 0) > 0:
                 lines.extend(["", "Timeout issues:", f"MEWORK: {main_timeout}"])
             lines.extend(["", summary_closer()])
-            return "\n".join(lines)
+            return finish(lines)
 
         if current_mode == "itc":
             lines = [f"{app_name} Auto-Routing Summary:"]
@@ -1112,7 +1653,7 @@ class SMDUSAPGui(QMainWindow):
                 lines.append(f"ITC: {main_timeout}")
             lines.append("")
             lines.append(summary_closer())
-            return "\n".join(lines)
+            return finish(lines)
 
         if current_mode == "irsplr":
             lines = [f"{app_name} Auto-Routing Summary:"]
@@ -1129,7 +1670,7 @@ class SMDUSAPGui(QMainWindow):
                 lines.append(f"IRSPLR: {main_timeout}")
             lines.append("")
             lines.append(summary_closer())
-            return "\n".join(lines)
+            return finish(lines)
 
         if current_mode == "ohtax0":
             lines = [f"{app_name} Auto-Routing Summary:"]
@@ -1146,7 +1687,7 @@ class SMDUSAPGui(QMainWindow):
                 lines.append(f"OHTAX0: {main_timeout}")
             lines.append("")
             lines.append(summary_closer())
-            return "\n".join(lines)
+            return finish(lines)
 
         if current_mode == "mnsutb":
             lines = [f"{app_name} Auto-Routing Summary:"]
@@ -1163,7 +1704,7 @@ class SMDUSAPGui(QMainWindow):
                 lines.append(f"MNSUTB: {main_timeout}")
             lines.append("")
             lines.append(summary_closer())
-            return "\n".join(lines)
+            return finish(lines)
 
         lines = [f"{app_name} Auto-Routing Summary:"]
 
@@ -1190,7 +1731,7 @@ class SMDUSAPGui(QMainWindow):
 
         lines.append("")
         lines.append(summary_closer())
-        return "\n".join(lines)
+        return finish(lines)
 
     def styled_button(self, text, on_click, width=160, height=40):
         btn = QPushButton(text)
@@ -1728,79 +2269,39 @@ class SMDUSAPGui(QMainWindow):
         title_bar.setFixedHeight(50)
         
         title_bar_layout = QHBoxLayout(title_bar)
-        title_bar_layout.setContentsMargins(15, 5, 10, 5)  # Reduced right margin to bring buttons closer to edge
+        # Symmetric outer margins let the selected-router control use the
+        # window's true visual center rather than the space left of controls.
+        title_bar_layout.setContentsMargins(10, 5, 10, 5)
         title_bar_layout.setSpacing(5)  # Reduced spacing between elements
         
-        # Router mode selector (center)
+        # Compatibility selector: existing mode/config code continues to sync
+        # this combobox, while the visible control is the Router Codex button.
         mode_combo = CenteredComboBox(self)
         self.mode_combo = mode_combo
         for mode_key, mode_label in self.get_mode_options():
             mode_combo.addItem(mode_label, mode_key)
-        mode_combo.setFixedWidth(260)
-        mode_combo.setFixedHeight(34)
-        mode_combo.setCursor(Qt.PointingHandCursor)
-        mode_combo.setToolTip("Select which autorouter mode to run.")
-        mode_combo.setStyleSheet("""
-            QComboBox {
-                color: rgba(255, 255, 255, 0.96);
-                font-size: 13px;
-                font-weight: 600;
-                margin: 0;
-                padding: 6px 30px 6px 30px;
-                background: rgba(255, 255, 255, 0.15);
-                border-radius: 12px;
-                border: 1px solid rgba(255, 255, 255, 0.3);
-                selection-background-color: rgba(0, 224, 255, 0.35);
-            }
-            QComboBox:hover {
-                background: rgba(110, 64, 192, 0.32);
-                border: 1px solid rgba(110, 64, 192, 0.65);
-                color: rgba(255, 255, 255, 1.0);
-            }
-            QComboBox:focus {
-                border: 1px solid rgba(0, 224, 255, 0.65);
-                background: rgba(255, 255, 255, 0.18);
-            }
-            QComboBox:disabled {
-                color: rgba(255, 255, 255, 0.55);
-                background: rgba(255, 255, 255, 0.08);
-                border: 1px solid rgba(255, 255, 255, 0.16);
-            }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 24px;
-                border: none;
-                background: transparent;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                width: 0px;
-                height: 0px;
-            }
-            QComboBox QAbstractItemView {
-                color: rgba(255, 255, 255, 0.96);
-                background: rgba(31, 22, 48, 0.96);
-                border: 1px solid rgba(255, 255, 255, 0.28);
-                border-radius: 8px;
-                padding: 4px;
-                outline: 0;
-                selection-background-color: rgba(0, 224, 255, 0.28);
-                selection-color: white;
-            }
-        """)
+        mode_combo.hide()
         mode_combo.currentIndexChanged.connect(self.on_mode_combo_changed)
-        
-        # Add shadow effect to the mode selector
+
+        router_codex_btn = QPushButton(self)
+        self.router_codex_btn = router_codex_btn
+        router_codex_btn.setFixedSize(250, 34)
+        router_codex_btn.setCursor(Qt.PointingHandCursor)
+        router_codex_btn.setToolTip("Open the Router Codex.")
+        router_codex_btn.clicked.connect(self.open_router_codex)
+        self._refresh_router_codex_button()
+
+        # Add shadow effect to the visible Router Codex control.
         title_shadow = QGraphicsDropShadowEffect()
         title_shadow.setBlurRadius(8)
         title_shadow.setColor(QColor(0, 0, 0, 100))
         title_shadow.setOffset(2, 2)
-        mode_combo.setGraphicsEffect(title_shadow)
+        router_codex_btn.setGraphicsEffect(title_shadow)
         
-        # Add stretch to center the selector
-        title_bar_layout.addStretch()
-        title_bar_layout.addWidget(mode_combo, 0, Qt.AlignCenter)
+        # Treat the selected router as a familiar workspace switcher: it has
+        # a clear left-aligned home, while the central drag area and window
+        # controls remain independent on the right.
+        title_bar_layout.addWidget(router_codex_btn, 0, Qt.AlignLeft | Qt.AlignVCenter)
         title_bar_layout.addStretch()
         
         # Window control buttons (right side)
@@ -2323,6 +2824,9 @@ class SMDUSAPGui(QMainWindow):
             "MNSUTB Batch Started": ("Processing MNSUTB Batch...", 0),
             "MEWORK Batch Started": ("Processing MEWORK Batch...", 0),
             "MOSU00 Batch Started": ("Processing MOSU00 Batch...", 0),
+            "FCC Batch Started": ("Processing FCC Batch...", 0),
+            "FERC Batch Started": ("Processing FERC Batch...", 0),
+            "NLRB Batch Started": ("Processing NLRB Batch...", 0),
             "Success!": ("Automation Complete!", 100),
             "Completed": ("Completed", 100),
         }
@@ -2337,6 +2841,9 @@ class SMDUSAPGui(QMainWindow):
             "MNSUTB Batch Started": "MNSUTB Processed",
             "MEWORK Batch Started": "MEWORK Processed",
             "MOSU00 Batch Started": "MOSU00 Processed",
+            "FCC Batch Started": "FCC Processed",
+            "FERC Batch Started": "FERC Processed",
+            "NLRB Batch Started": "NLRB Processed",
         }
 
         if message in friendly_statuses:
@@ -2362,7 +2869,13 @@ class SMDUSAPGui(QMainWindow):
             "MNSUTB Processed",
             "MEWORK Processed",
             "MOSU00 Processed",
+            "FCC Processed",
+            "FERC Processed",
+            "NLRB Processed",
         )
+        if str(message).startswith("NLRB recovery:"):
+            self.progress_label.setText(message)
+            return
         if any(str(message).startswith(prefix) for prefix in allowed_progress_prefixes):
             try:
                 current, total = map(int, message.split(":")[1].strip().split("/"))
@@ -2378,38 +2891,41 @@ class SMDUSAPGui(QMainWindow):
         if batch == "counsel":
             self.progress_label.setText(f"Counsel Processed: {current}/{total}")
             percent = int((current / total) * 100) if total > 0 else 0
-            self.progress_bar.setValue(percent)
         elif batch == "mspb":
             self.progress_label.setText(f"MSPB Processed: {current}/{total}")
             percent = int((current / total) * 100) if total > 0 else 0
-            self.progress_bar.setValue(percent)
         elif batch == "itc":
             self.progress_label.setText(f"ITC Processed: {current}/{total}")
             percent = int((current / total) * 100) if total > 0 else 0
-            self.progress_bar.setValue(percent)
         elif batch == "irsplr":
             self.progress_label.setText(f"IRSPLR Processed: {current}/{total}")
             percent = int((current / total) * 100) if total > 0 else 0
-            self.progress_bar.setValue(percent)
         elif batch == "ohtax0":
             self.progress_label.setText(f"OHTAX0 Processed: {current}/{total}")
             percent = int((current / total) * 100) if total > 0 else 0
-            self.progress_bar.setValue(percent)
         elif batch == "mnsutb":
             self.progress_label.setText(f"MNSUTB Processed: {current}/{total}")
             percent = int((current / total) * 100) if total > 0 else 0
-            self.progress_bar.setValue(percent)
         elif batch == "mework":
             self.progress_label.setText(f"MEWORK Processed: {current}/{total}")
             percent = int((current / total) * 100) if total > 0 else 0
-            self.progress_bar.setValue(percent)
         elif batch == "mosu00":
             self.progress_label.setText(f"MOSU00 Processed: {current}/{total}")
             percent = int((current / total) * 100) if total > 0 else 0
-            self.progress_bar.setValue(percent)
+        elif batch == "fcc":
+            self.progress_label.setText(f"FCC Processed: {current}/{total}")
+            percent = int((current / total) * 100) if total > 0 else 0
+        elif batch == "ferc":
+            self.progress_label.setText(f"FERC Processed: {current}/{total}")
+            percent = int((current / total) * 100) if total > 0 else 0
+        elif batch == "nlrb":
+            self.progress_label.setText(f"NLRB Processed: {current}/{total}")
+            percent = int((current / total) * 100) if total > 0 else 0
         elif batch == "main":
             self.progress_label.setText(f"Main Opinion Processed: {current}/{total}")
             percent = int((current / total) * 100) if total > 0 else 0
+        else:
+            return
         self.progress_bar.setValue(percent)
 
     def start_processing_gif(self):
@@ -2622,7 +3138,8 @@ class SMDUSAPGui(QMainWindow):
                 self.error_signal.emit("No valid data in Excel.")
                 return
             
-            # Auto-detect mode from filenames
+            # Inspect filename patterns for diagnostics; the selected Codex
+            # router remains authoritative for the run.
             self.auto_detect_mode_from_filenames(df)
             
             # Log the current mode configuration
@@ -2652,8 +3169,13 @@ class SMDUSAPGui(QMainWindow):
                 mnsutb_mode=current_mode == "mnsutb",
                 mework_mode=current_mode == "mework",
                 mosu00_mode=current_mode == "mosu00",
+                fcc_mode=current_mode == "fcc",
+                ferc_mode=current_mode == "ferc",
+                nlrb_mode=current_mode == "nlrb",
             )
             self.worker_thread.start()
+            # Count one launched run, not card clicks.
+            record_router_run(current_mode)
         except Exception as e:
             logging.error(f"Error initializing progress tracking: {str(e)}")
             import traceback
@@ -2843,7 +3365,8 @@ class SMDUSAPGui(QMainWindow):
                     message += f"...and {len(error_log_entries) - 10} more. See error report for details.\n"
 
         return message
-    def handle_success(self, user_name, counsel_success, main_success, counsel_already, main_already, counsel_timeout=0, main_timeout=0):
+    def handle_success(self, user_name, counsel_success, main_success, counsel_already, main_already,
+                       counsel_timeout=0, main_timeout=0, review_summary=None):
         def do_handle():
             self._automation_completed = True
             logging.info("Starting post-automation cleanup...")
@@ -2900,7 +3423,10 @@ class SMDUSAPGui(QMainWindow):
 
             # If in minimal mode, show notification popup and set pending messagebox
             if self.minimal_mode:
-                self._pending_success_messagebox = (user_name, counsel_success, main_success, counsel_already, main_already, counsel_timeout, main_timeout)
+                self._pending_success_messagebox = (
+                    user_name, counsel_success, main_success, counsel_already, main_already,
+                    counsel_timeout, main_timeout, review_summary,
+                )
                 self.header_visible = True
                 self.is_running = False
                 self._update_run_locked_controls()
@@ -2943,7 +3469,8 @@ class SMDUSAPGui(QMainWindow):
                 counsel_already, main_already,
                 error_log_entries=global_error_log_entries,
                 counsel_timeout=counsel_timeout,
-                main_timeout=main_timeout
+                main_timeout=main_timeout,
+                review_summary=review_summary,
             )
             logging.info(f"Auto-Routing Summary: {success_message}")
             if global_error_log_entries and len(global_error_log_entries) > 0:
@@ -2977,8 +3504,14 @@ class SMDUSAPGui(QMainWindow):
             total_success = (counsel_success or 0) + (main_success or 0)
             total_already = (counsel_already or 0) + (main_already or 0)
             total_errors = len(global_error_log_entries) if global_error_log_entries else 0
+            manual_review_count = int((review_summary or {}).get("manual_review_count", 0) or 0)
+            needs_rerun_count = int((review_summary or {}).get("needs_rerun_count", 0) or 0)
 
-            if total_errors > 0 and (total_success > 0 or total_already > 0):
+            if needs_rerun_count > 0:
+                headline = "RERUN REQUIRED"
+            elif manual_review_count > 0:
+                headline = "REVIEW NEEDED"
+            elif total_errors > 0 and (total_success > 0 or total_already > 0):
                 headline = "ALMOST THERE!"
             elif total_success > 0 or total_already > 0:
                 headline = "SUCCESS!"
@@ -2996,7 +3529,8 @@ class SMDUSAPGui(QMainWindow):
                 counsel_already, main_already,
                 error_log_entries=global_error_log_entries,
                 counsel_timeout=counsel_timeout,
-                main_timeout=main_timeout
+                main_timeout=main_timeout,
+                review_summary=review_summary,
             )
             box = ModernMessageBox(success_title, success_message, "success", self)
             self._success_box = box
@@ -3036,7 +3570,14 @@ class SMDUSAPGui(QMainWindow):
                 toast_title = "DAR Auto-Routing Complete"
             else:
                 toast_title = "SMD USAP Courts Auto-Routing Complete"
-            toast_msg = f"Awesome job, {user_name}! Click to open app and view summary."
+            if needs_rerun_count:
+                toast_title = f"{self.get_app_title()}: Rerun Required"
+                toast_msg = f"{needs_rerun_count} document(s) did not complete. Click to open the summary."
+            elif manual_review_count:
+                toast_title = f"{self.get_app_title()}: Review Needed"
+                toast_msg = f"{manual_review_count} document(s) need manual review. Click to open the summary."
+            else:
+                toast_msg = f"Awesome job, {user_name}! Click to open app and view summary."
             self.show_toast_notification(toast_title, toast_msg)
             box.exec_()
 
@@ -3437,9 +3978,19 @@ class SMDUSAPGui(QMainWindow):
                 logging.info(f"Showing pending success messagebox. Args: {self._pending_success_messagebox}")
                 
                 args = self._pending_success_messagebox
-                if isinstance(args, tuple) and len(args) == 7:
-                    user_name, counsel_success, main_success, counsel_already, main_already, counsel_timeout, main_timeout = args
-                    message = self.build_success_message(user_name, counsel_success, main_success, counsel_already, main_already, error_log_entries=global_error_log_entries)
+                if isinstance(args, tuple) and len(args) == 8:
+                    user_name, counsel_success, main_success, counsel_already, main_already, counsel_timeout, main_timeout, review_summary = args
+                    message = self.get_success_message(
+                        user_name,
+                        counsel_success,
+                        main_success,
+                        counsel_already,
+                        main_already,
+                        error_log_entries=global_error_log_entries,
+                        counsel_timeout=counsel_timeout,
+                        main_timeout=main_timeout,
+                        review_summary=review_summary,
+                    )
 
                     box = self.create_styled_message_box(
                         self.get_success_title(),
@@ -4193,6 +4744,10 @@ class SMDUSAPGui(QMainWindow):
         if self.notification_badge:
             self.notification_badge.hide()
 
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._position_router_codex()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, '_sync_header_badge_effect_geometry'):
@@ -4200,6 +4755,7 @@ class SMDUSAPGui(QMainWindow):
         # Reposition badge if visible
         if hasattr(self, 'notification_badge') and self.notification_badge and self.notification_badge.isVisible():
             self._position_notification_badge()
+        self._position_router_codex()
 
 
     def show_toast_notification(self, title, message):
@@ -4829,6 +5385,12 @@ if __name__ == '__main__':
                 app_name = "MEWORK Autorouter"
             elif mode == "mosu00":
                 app_name = "MOSU Autorouter"
+            elif mode == "fcc":
+                app_name = "FCC Autorouter"
+            elif mode == "ferc":
+                app_name = "FERC Autorouter"
+            elif mode == "nlrb":
+                app_name = "NLRB Autorouter"
             elif mode == "dar":
                 app_name = "DAR Autoruter"
             else:

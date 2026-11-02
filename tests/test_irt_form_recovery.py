@@ -31,6 +31,7 @@ class IRTFormRecoveryTests(unittest.TestCase):
         router.wait.until.side_effect = Exception("case name intentionally unavailable")
         router.click_element = Mock()
         router.handle_any_alert = Mock()
+        router.ensure_related_lni_input_ready = Mock(return_value=True)
         router.handle_related_ln_is = Mock(return_value=False)
         router.driver = Mock()
         row = {"FileName": "MOSU00_123.pdf", "LNI": "6KMY-TEST"}
@@ -40,6 +41,43 @@ class IRTFormRecoveryTests(unittest.TestCase):
 
         self.assertEqual(result, "RELATED LNI ATTACH FAILED")
         router.driver.close.assert_not_called()
+
+    def test_main_opinion_stops_when_related_controls_do_not_recover(self):
+        router = CaseLawRouter.__new__(CaseLawRouter)
+        router.wait = Mock()
+        router.wait.until.side_effect = Exception("case name intentionally unavailable")
+        router.ensure_related_lni_input_ready = Mock(return_value=False)
+        router.handle_related_ln_is = Mock()
+        row = {"FileName": "MOSU00_123.pdf", "LNI": "6KMY-TEST"}
+
+        result = router.handle_main_opinion_fields(row, {}, 4, "sample.pdf")
+
+        self.assertEqual(result, "RELATED LNI FIELD LOCKED")
+        self.assertEqual(status_updates_buffer[4], "RELATED LNI FIELD LOCKED")
+        router.handle_related_ln_is.assert_not_called()
+
+    def test_related_control_recovery_reselects_related_before_waiting_for_input(self):
+        router = CaseLawRouter.__new__(CaseLawRouter)
+        checkbox = Mock()
+        checkbox.is_selected.return_value = False
+        field = Mock()
+        field.is_displayed.return_value = True
+        field.is_enabled.return_value = True
+        field.get_attribute.return_value = ""
+        router.driver = Mock()
+        router.driver.find_element.side_effect = lambda _by, xpath: checkbox if xpath == '//*[@id="related"]' else field
+        router.handle_any_alert = Mock()
+
+        with patch("core.smducar_router.WebDriverWait") as wait:
+            checkbox_wait = Mock()
+            checkbox_wait.until.return_value = checkbox
+            controls_wait = Mock()
+            controls_wait.until.return_value = True
+            wait.side_effect = [checkbox_wait, controls_wait]
+            self.assertTrue(router.ensure_related_lni_input_ready())
+
+        checkbox.click.assert_called_once()
+        router.handle_any_alert.assert_called_once_with(timeout=2)
 
     def test_mosu_save_does_not_click_when_the_dialog_is_gone(self):
         router = CaseLawRouter.__new__(CaseLawRouter)

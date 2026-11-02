@@ -67,6 +67,9 @@ from .mework_extractor import (
 from .mosu00_extractor import (
     is_mosu00_row,
 )
+from .fcc_extractor import is_fcc_row
+from .ferc_extractor import is_ferc_row
+from .nlrb_extractor import is_nlrb_row
 
 from .smducar_data import (
     filter_mapping_data,
@@ -93,6 +96,14 @@ from .critical_error_notifier import (
 from .rerun_status import (
     defer_main_rows_with_failed_counsel,
     finalize_rerun_ready_statuses,
+    is_completed_status,
+    normalize_status,
+    should_recheck_irsplr_comment_review,
+    should_recheck_irsplr_pdf_review,
+    should_recheck_smd_decision_date,
+    STATUS_DECISION_DATE_UPDATED,
+    STATUS_PROCESSING,
+    summarize_statuses_for_rows,
 )
 
 from .chromedriver_resolver import (
@@ -101,7 +112,16 @@ from .chromedriver_resolver import (
 
 
 MAX_PARALLEL_ROUTERS = 6
-COMPLETED_ROW_STATUSES = {"DONE", "ALREADY PROCESSED"}
+# These statuses are only emitted before filling/submitting the IRT form.
+# Never auto-replay a generic error, review stop, or unconfirmed Save.
+ITC_PRE_SAVE_RECOVERY_STATUSES = {
+    "ERROR: IRT FORM NOT EDITABLE AFTER 3 ATTEMPTS",
+    "ERROR: MODIFY BUTTON NOT FOUND AFTER 3 ATTEMPTS",
+}
+COMPLETED_ROW_STATUSES = {
+    "DONE", "ALREADY PROCESSED", STATUS_DECISION_DATE_UPDATED, "NEEDS REVIEW", "ERRATA FOR REVIEW",
+    "ERRATA ATTACHMENT FOR REVIEW", "ATTACHMENT FOR REVIEW",
+}
 _worker_log_context = threading.local()
 _worker_log_factory_installed = False
 _worker_log_factory_lock = threading.Lock()
@@ -160,7 +180,9 @@ def _get_parallel_router_count(config):
     return max(1, min(requested_routers, MAX_PARALLEL_ROUTERS))
 
 
-def _get_mode_router_label(dar_mode=False, mspb_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
+def _get_mode_router_label(dar_mode=False, mspb_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False, nlrb_mode=False):
+    if nlrb_mode:
+        return "NLRB"
     if mspb_mode:
         return "MSPB"
     if itc_mode:
@@ -185,14 +207,14 @@ def _resolve_chromedriver_path():
     return resolve_compatible_chromedriver_path()
 
 
-def _build_chrome_options(config, download_dir):
+def _build_chrome_options(config, download_dir, *, browser_pdf_viewer=False):
     chrome_options = Options()
     chrome_options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
     chrome_options.add_experimental_option("prefs", {
         "download.default_directory": str(download_dir),
         "download.prompt_for_download": False,
         "download.directory_upgrade": True,
-        "plugins.always_open_pdf_externally": True,
+        "plugins.always_open_pdf_externally": not browser_pdf_viewer,
         "safebrowsing.enabled": True,
     })
 
@@ -289,7 +311,7 @@ def _split_dataframe_evenly(df, worker_count):
     return chunks
 
 
-def _select_parallel_rows(df, limit):
+def _select_parallel_rows(df, limit, *, smd_date_cleanup=False):
     if "LNI" not in df.columns:
         return df.iloc[0:0]
 
@@ -299,24 +321,29 @@ def _select_parallel_rows(df, limit):
         & df["LNI"].astype(str).str.strip().str.lower().ne("nan")
     )
     if "Status" in df.columns:
-        valid_lni_mask = valid_lni_mask & ~_completed_status_mask(df)
+        valid_lni_mask = valid_lni_mask & ~_completed_status_mask(df, smd_date_cleanup=smd_date_cleanup)
     selected = df[valid_lni_mask].copy()
     if limit and limit > 0:
         selected = selected.head(limit)
     return selected
 
 
-def _completed_status_mask(df):
+def _completed_status_mask(df, *, smd_date_cleanup=False):
     if "Status" not in df.columns:
         return pd.Series(False, index=df.index)
-    return df["Status"].astype(str).str.strip().str.upper().isin(COMPLETED_ROW_STATUSES)
+    completed = df["Status"].map(is_completed_status)
+    if df.empty:
+        return completed
+    recheck_dates = df.apply(lambda row: should_recheck_smd_decision_date(row, smd_mode=smd_date_cleanup), axis=1)
+    return completed & ~df.apply(should_recheck_irsplr_comment_review, axis=1) & ~df.apply(should_recheck_irsplr_pdf_review, axis=1) & ~recheck_dates
 
 
-def _select_parallel_document_rows(df_filtered, full_df, limit, dar_mode=False, wc_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
-    selected = _select_parallel_rows(df_filtered, limit)
+def _select_parallel_document_rows(df_filtered, full_df, limit, dar_mode=False, wc_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False, nlrb_mode=False):
+    smd_date_cleanup = not any((dar_mode, wc_mode, itc_mode, irsplr_mode, ohtax0_mode, mnsutb_mode, mework_mode, mosu00_mode, nlrb_mode))
+    selected = _select_parallel_rows(df_filtered, limit, smd_date_cleanup=smd_date_cleanup)
     if selected.empty:
         return selected
-    if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode:
+    if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode or nlrb_mode:
         return selected
 
     selected_indices = set(selected.index)
@@ -332,6 +359,9 @@ def _select_parallel_document_rows(df_filtered, full_df, limit, dar_mode=False, 
 
     dependency_indices = []
     for _, row in selected.iterrows():
+        if should_recheck_smd_decision_date(row, smd_mode=smd_date_cleanup):
+            # Correcting a saved date must not schedule unrelated counsel work.
+            continue
         file_name = str(row.get("FileName", "")).strip()
         if is_counsel(file_name, dar_mode, wc_mode):
             continue
@@ -364,9 +394,9 @@ def _select_parallel_document_rows(df_filtered, full_df, limit, dar_mode=False, 
     return selected
 
 
-def _is_counsel_result_row(row, mspb_mode, dar_mode, wc_mode, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
+def _is_counsel_result_row(row, mspb_mode, dar_mode, wc_mode, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False, nlrb_mode=False):
     """Return True when a result row should be counted under the counsel bucket."""
-    if mspb_mode or itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode:
+    if mspb_mode or itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode or nlrb_mode:
         return False
     return is_counsel(str(row.get("FileName", "")), dar_mode, wc_mode)
 
@@ -375,7 +405,7 @@ def _empty_result_counts():
     return (0, 0, 0, 0, 0, 0)
 
 
-def _count_results_for_rows(df, mspb_mode, dar_mode, wc_mode, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False, current_run_only=False):
+def _count_results_for_rows(df, mspb_mode, dar_mode, wc_mode, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False, current_run_only=False, nlrb_mode=False):
     counsel_success = 0
     main_success = 0
     counsel_already = 0
@@ -398,6 +428,7 @@ def _count_results_for_rows(df, mspb_mode, dar_mode, wc_mode, itc_mode=False, ir
             mnsutb_mode=mnsutb_mode,
             mework_mode=mework_mode,
             mosu00_mode=mosu00_mode,
+            nlrb_mode=nlrb_mode,
         )
         status = str(status_updates_buffer.get(idx, str(row.get("Status", "")))).strip()
         normalized_status = status.upper()
@@ -407,7 +438,7 @@ def _count_results_for_rows(df, mspb_mode, dar_mode, wc_mode, itc_mode=False, ir
                 counsel_success += 1
             else:
                 main_success += 1
-        elif normalized_status == "ALREADY PROCESSED":
+        elif normalized_status in {"ALREADY PROCESSED", STATUS_DECISION_DATE_UPDATED}:
             if is_counsel_file:
                 counsel_already += 1
             else:
@@ -464,7 +495,8 @@ def _write_router_split_workbook(router_id, batch_type, router_df, output_dir):
         output_dir.mkdir(parents=True, exist_ok=True)
         workbook_path = output_dir / f"Router {router_id} - Case Law Auto-Routing Split.xlsx"
         sheet_name = (
-            "ITC Split" if batch_type == "itc"
+            "NLRB Split" if batch_type == "nlrb"
+            else "ITC Split" if batch_type == "itc"
             else "IRSPLR Split" if batch_type == "irsplr"
             else "OHTAX0 Split" if batch_type == "ohtax0"
             else "MNSUTB Split" if batch_type == "mnsutb"
@@ -534,6 +566,7 @@ def _write_router_split_workbook(router_id, batch_type, router_df, output_dir):
         status_styles = {
             "DONE": {"bold": True, "color": "00A86B"},
             "ALREADY PROCESSED": {"bold": True, "color": "4F39BC"},
+            "DECISION DATE UPDATED": {"bold": True, "color": "4F39BC"},
             "ERROR: LNI NOT FOUND": {"bold": True, "color": "E3242B"},
             "ERROR: INVALID LNI FORMAT": {"bold": True, "color": "E3242B"},
             "ERROR: UNABLE TO LOAD IRT FORM WINDOW": {"bold": True, "color": "E3242B"},
@@ -735,7 +768,7 @@ def _run_parallel_mspb_workflow(update_progress=None, set_status=None, show_succ
     result_counts = _count_results_for_rows(selected_df, True, False, False, current_run_only=True)
     user_name = clean_display_name(get_full_username())
     if show_success:
-        show_success(user_name, *result_counts)
+        show_success(user_name, *result_counts, rerun_summary)
 
     excel_flushed = False
     try:
@@ -761,6 +794,7 @@ def _run_parallel_mspb_workflow(update_progress=None, set_status=None, show_succ
             latest_excel=latest_excel,
             mode="mspb",
             result_counts=_result_counts_payload(result_counts),
+            run_status_summary=rerun_summary,
             context="MSPB parallel router run completed.",
             config=config,
         )
@@ -772,22 +806,25 @@ def _run_parallel_mspb_workflow(update_progress=None, set_status=None, show_succ
 
 def _run_document_router_phase(router_id, batch_type, router_df, full_df, latest_excel, config, driver_path, env_url,
                                create_router, show_error, set_status, update_progress, dar_mode, wc_mode, mode_label,
-                               irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
+                               irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False, nlrb_mode=False):
     driver = None
-    router_name = f"{mode_label} Router {router_id}"
+    recovery = (batch_type == "itc" and config.get("_itc_fresh_recovery", False)) or (nlrb_mode and config.get("_nlrb_fresh_recovery", False))
+    router_name = f"{mode_label} {'Recovery ' if recovery else ''}Router {router_id}"
     _set_worker_log_label(router_name)
-    download_dir = (
+    download_root = (
         Path.home()
         / "Downloads"
         / "Case Law Auto-Routing Resources"
         / "Parallel Router Downloads"
-        / f"Router {router_id}"
     )
+    if recovery:
+        download_root = download_root / f"{mode_label} Recovery"
+    download_dir = download_root / f"Router {router_id}"
     download_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         logging.info(f"Starting {batch_type} batch with {len(router_df)} LNI(s).")
-        chrome_options = _build_chrome_options(config, download_dir)
+        chrome_options = _build_chrome_options(config, download_dir, browser_pdf_viewer=irsplr_mode)
         driver = _create_chrome_driver(driver_path, chrome_options, config.get("headless", False))
         logging.info(f"Navigating to: {env_url}")
         _navigate_with_retries(driver, env_url)
@@ -811,7 +848,22 @@ def _run_document_router_phase(router_id, batch_type, router_df, full_df, latest
         router.mework_download_dir.mkdir(parents=True, exist_ok=True)
         router.mosu00_download_dir = download_dir / "MOSU00 HTML Downloads"
         router.mosu00_download_dir.mkdir(parents=True, exist_ok=True)
+        if nlrb_mode:
+            router.nlrb_download_dir = download_dir / "NLRB PDF Downloads"
+            router.nlrb_download_dir.mkdir(parents=True, exist_ok=True)
         router.full_df = full_df
+        # Parallel workers call process_batch directly instead of process_rows.
+        # Initialise the same duplicate-alert policy here so SADM/DAR counsel
+        # runs never enter the document-content comparison workflow.
+        router.configure_irt_duplicate_verification(
+            itc_mode=batch_type == "itc",
+            irsplr_mode=irsplr_mode,
+            ohtax0_mode=ohtax0_mode,
+            mnsutb_mode=mnsutb_mode,
+            mework_mode=mework_mode,
+            mosu00_mode=mosu00_mode,
+            nlrb_mode=nlrb_mode,
+        )
         if not _open_search_inventory_with_recovery(router, driver, env_url, router_name):
             raise RuntimeError(f"{router_name} could not open Search Inventory before processing {batch_type} rows.")
         processed_count, duration = router.process_batch(
@@ -823,11 +875,13 @@ def _run_document_router_phase(router_id, batch_type, router_df, full_df, latest
             dar_mode,
             wc_mode,
             mspb_mode=False,
+            itc_mode=batch_type == "itc",
             irsplr_mode=irsplr_mode,
             ohtax0_mode=ohtax0_mode,
             mnsutb_mode=mnsutb_mode,
             mework_mode=mework_mode,
             mosu00_mode=mosu00_mode,
+            nlrb_mode=nlrb_mode,
         )
         logging.info(f"Completed {batch_type} batch.")
         return processed_count, duration
@@ -836,13 +890,21 @@ def _run_document_router_phase(router_id, batch_type, router_df, full_df, latest
         logging.error(f"Failed during {batch_type} batch: {e}")
         logging.error(f"Traceback: {tb}")
         for idx, row in router_df.iterrows():
-            if idx not in status_updates_buffer:
-                status_updates_buffer[idx] = "ERROR"
+            current_status = normalize_status(status_updates_buffer.get(idx, row.get("Status", "")))
+            if is_completed_status(current_status):
+                continue
+            # A crashed batch may have marked its row PROCESSING already.
+            # Include that row as a failure as well as unattempted rows, or
+            # the UI can incorrectly report that no unfinished work exists.
+            if idx not in status_updates_buffer or current_status == STATUS_PROCESSING:
+                current_status = "ERROR"
+            status_updates_buffer[idx] = current_status or "ERROR"
+            if not any(entry.get("Row") == idx + 2 for entry in error_log_entries):
                 error_log_entries.append({
                     "Row": idx + 2,
                     "LNI": row.get("LNI", ""),
                     "File Name": row.get("FileName", ""),
-                    "Status": "ERROR",
+                    "Status": status_updates_buffer[idx],
                     "Error Message": str(e),
                 })
         logging.warning(
@@ -863,7 +925,7 @@ def _run_document_router_phase(router_id, batch_type, router_df, full_df, latest
 
 def _run_parallel_document_phase(batch_type, phase_df, full_df, latest_excel, config, driver_path, env_url,
                                  requested_routers, update_progress, create_router, show_error, set_status,
-                                 dar_mode, wc_mode, mode_label, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
+                                 dar_mode, wc_mode, mode_label, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False, nlrb_mode=False):
     if phase_df.empty:
         if update_progress:
             update_progress(batch_type, 0, 0)
@@ -882,8 +944,8 @@ def _run_parallel_document_phase(batch_type, phase_df, full_df, latest_excel, co
             with progress_lock:
                 router_progress[router_id] = current
                 aggregate_current = min(sum(router_progress.values()), total_rows)
-            if update_progress:
-                update_progress(batch_type, aggregate_current, total_rows)
+                if update_progress:
+                    update_progress(batch_type, aggregate_current, total_rows)
         return update_router_progress
 
     if update_progress:
@@ -916,6 +978,7 @@ def _run_parallel_document_phase(batch_type, phase_df, full_df, latest_excel, co
                 mnsutb_mode,
                 mework_mode,
                 mosu00_mode,
+                nlrb_mode,
             ))
 
         for future in as_completed(futures):
@@ -926,9 +989,56 @@ def _run_parallel_document_phase(batch_type, phase_df, full_df, latest_excel, co
     return processed_count, total_duration
 
 
+def _itc_pre_save_recovery_rows(scope_df, *, nlrb_mode=False):
+    """Select this run's known pre-Save ITC or NLRB failures, preserving source indices."""
+    indices = [idx for idx, row in scope_df.iterrows()
+               if (is_nlrb_row(row) if nlrb_mode else is_itc_row(row)) and normalize_status(status_updates_buffer.get(idx)) in ITC_PRE_SAVE_RECOVERY_STATUSES]
+    return scope_df.loc[indices].copy()
+
+
+def _recover_itc_pre_save_failures(scope_df, full_df, latest_excel, config, driver_path, env_url,
+                                  requested_routers, create_router=None, show_error=None, set_status=None, *, nlrb_mode=False):
+    """Make one isolated recovery pass after the initial browsers have stopped."""
+    mode_label = "NLRB" if nlrb_mode else "ITC"
+    recovery_key = "_nlrb_fresh_recovery" if nlrb_mode else "_itc_fresh_recovery"
+    if config.get(recovery_key, False):
+        return 0, 0
+    retry_df = _itc_pre_save_recovery_rows(scope_df, nlrb_mode=nlrb_mode)
+    if retry_df.empty:
+        return 0, 0
+    workers = min(2, max(1, requested_routers), len(retry_df))
+    logging.warning("%s automatic fresh-browser recovery: retrying %d pre-Save failure(s) once with %d browser(s).", mode_label, len(retry_df), workers)
+    if set_status:
+        set_status(f"{mode_label} recovery: retrying {len(retry_df)} record(s)")
+    retry_config = dict(config, **{recovery_key: True})
+    count, duration = 0, 0
+    try:
+        # Each phase worker creates and quits its own Chrome instance. Do
+        # not reset the main progress bar to this smaller recovery batch.
+        count, duration = _run_parallel_document_phase(
+            mode_label.lower(), retry_df, full_df, latest_excel, retry_config, driver_path, env_url,
+            workers, None, create_router, show_error, set_status, False, False, mode_label, **({"nlrb_mode": True} if nlrb_mode else {}),
+        )
+    except Exception:
+        logging.exception("%s fresh-browser recovery could not finish; preserving row outcomes for the final rerun report.", mode_label)
+    resolved = {
+        (idx + 2, str(row.get("LNI", "")).strip().upper())
+        for idx, row in retry_df.iterrows()
+        if is_completed_status(status_updates_buffer.get(idx))
+    }
+    # A recovered technical failure must not remain in the final error
+    # report/email. Its first-attempt history is still in the run log.
+    error_log_entries[:] = [
+        entry for entry in error_log_entries
+        if (entry.get("Row"), str(entry.get("LNI", "")).strip().upper()) not in resolved
+    ]
+    logging.info("%s fresh-browser recovery finished: %d/%d record(s) reached a terminal outcome; remaining failures will retain rerun flags.", mode_label, len(resolved), len(retry_df))
+    return count, duration
+
+
 def _run_parallel_document_workflow(update_progress=None, set_status=None, show_success=None, show_error=None,
                                     create_router=None, latest_excel=None, df=None, df_filtered=None, config=None,
-                                    dar_mode=False, wc_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
+                                    dar_mode=False, wc_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False, nlrb_mode=False):
     config = config or load_config()
     df_filtered = df_filtered if df_filtered is not None else df
 
@@ -946,6 +1056,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
         mnsutb_mode=mnsutb_mode,
         mework_mode=mework_mode,
         mosu00_mode=mosu00_mode,
+        nlrb_mode=nlrb_mode,
     )
 
     if selected_df.empty:
@@ -954,7 +1065,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
             show_error("Parallel router mode found no valid LNI rows to process.")
         return pd.DataFrame(), pd.DataFrame()
 
-    if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode:
+    if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode or nlrb_mode:
         counsel_df = selected_df.iloc[0:0].copy()
         main_df = selected_df.copy()
     else:
@@ -967,6 +1078,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
         mnsutb_mode=mnsutb_mode,
         mework_mode=mework_mode,
         mosu00_mode=mosu00_mode,
+        nlrb_mode=nlrb_mode,
     )
     logging.info(
         "%s parallel router mode enabled: %d LNI(s), %d counsel, %d main, requested limit=%s, router instances=%d.",
@@ -985,10 +1097,10 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
         "staging": "https://tcfabstaging.lexisnexis.com/shared/InventoryInvoicing/"
     }.get(config.get("environment", "prod"))
 
-    if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode:
+    if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode or nlrb_mode:
         counsel_count = 0
         counsel_duration = 0
-        batch_type = "itc" if itc_mode else "irsplr" if irsplr_mode else "ohtax0" if ohtax0_mode else "mnsutb" if mnsutb_mode else "mework"
+        batch_type = "itc" if itc_mode else "irsplr" if irsplr_mode else "ohtax0" if ohtax0_mode else "mnsutb" if mnsutb_mode else "nlrb" if nlrb_mode else "mework"
         logging.info("=== Starting Parallel %s Batch ===", mode_label)
         if set_status:
             set_status(f"{mode_label} Batch Started")
@@ -1013,7 +1125,15 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
             mnsutb_mode=mnsutb_mode,
             mework_mode=mework_mode,
             mosu00_mode=mosu00_mode,
+            nlrb_mode=nlrb_mode,
         )
+        if itc_mode or nlrb_mode:
+            recovered_count, recovered_duration = _recover_itc_pre_save_failures(
+                main_df, df, latest_excel, config, driver_path, env_url, requested_routers,
+                create_router=create_router, show_error=show_error, set_status=set_status, nlrb_mode=nlrb_mode,
+            )
+            main_count += recovered_count
+            main_duration += recovered_duration
         if set_status:
             set_status(f"{mode_label} Batch Processed")
     else:
@@ -1038,6 +1158,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
             mode_label,
             irsplr_mode=False,
             mosu00_mode=mosu00_mode,
+            nlrb_mode=nlrb_mode,
         )
         if set_status:
             set_status("Counsel Batch Processed")
@@ -1078,6 +1199,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
             mode_label,
             irsplr_mode=False,
             mosu00_mode=mosu00_mode,
+            nlrb_mode=nlrb_mode,
         )
         if set_status:
             set_status(f"{main_batch_label} Batch Processed")
@@ -1093,7 +1215,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
             int(total_time // 60),
             int(total_time % 60),
         )
-        if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode:
+        if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode or nlrb_mode:
             logging.info(
                 "    - %s: %d LNIs in %dm %ds",
                 mode_label,
@@ -1119,7 +1241,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
     if set_status:
         set_status("Success!")
 
-    summary_df = selected_df if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode or limit > 0 else df
+    summary_df = selected_df if itc_mode or irsplr_mode or ohtax0_mode or mnsutb_mode or mework_mode or nlrb_mode or limit > 0 else df
     rerun_summary = finalize_rerun_ready_statuses(
         df=df,
         latest_excel=None,
@@ -1138,11 +1260,12 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
         mnsutb_mode=mnsutb_mode,
         mework_mode=mework_mode,
         mosu00_mode=mosu00_mode,
+        nlrb_mode=nlrb_mode,
         current_run_only=True,
     )
     user_name = clean_display_name(get_full_username())
     if show_success:
-        show_success(user_name, *result_counts)
+        show_success(user_name, *result_counts, rerun_summary)
 
     excel_flushed = False
     try:
@@ -1168,6 +1291,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
             latest_excel=latest_excel,
             mode=mode_label.lower(),
             result_counts=_result_counts_payload(result_counts),
+            run_status_summary=rerun_summary,
             context=f"{mode_label} parallel router run completed.",
             config=config,
         )
@@ -1178,7 +1302,7 @@ def _run_parallel_document_workflow(update_progress=None, set_status=None, show_
 
 
 def run_automation_workflow(update_progress=None, set_status=None, show_success=None, show_error=None, total_count=1,
-                            create_router=None, latest_excel=None, df=None, dar_mode=False, wc_mode=False, mspb_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False):
+                            create_router=None, latest_excel=None, df=None, dar_mode=False, wc_mode=False, mspb_mode=False, itc_mode=False, irsplr_mode=False, ohtax0_mode=False, mnsutb_mode=False, mework_mode=False, mosu00_mode=False, fcc_mode=False, ferc_mode=False, nlrb_mode=False):
     """
     Main automation workflow that orchestrates the entire process.
     
@@ -1221,7 +1345,31 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
             return
 
         # Count already processed rows before filtering
-        if itc_mode:
+        if nlrb_mode:
+            run_scope_df = df[df.apply(is_nlrb_row, axis=1)].copy()
+            if run_scope_df.empty:
+                message = "NLRB Autorouter mode found no FDNLRB00 rows to process."
+                logging.warning(message)
+                if show_error:
+                    show_error(message)
+                return pd.DataFrame(), pd.DataFrame()
+        elif ferc_mode:
+            run_scope_df = df[df.apply(is_ferc_row, axis=1)].copy()
+            if run_scope_df.empty:
+                message = "FERC Autorouter mode found no FDFERC00 rows to process."
+                logging.warning(message)
+                if show_error:
+                    show_error(message)
+                return pd.DataFrame(), pd.DataFrame()
+        elif fcc_mode:
+            run_scope_df = df[df.apply(is_fcc_row, axis=1)].copy()
+            if run_scope_df.empty:
+                message = "FCC Autorouter mode found no FDFCC000 rows to process."
+                logging.warning(message)
+                if show_error:
+                    show_error(message)
+                return pd.DataFrame(), pd.DataFrame()
+        elif itc_mode:
             run_scope_df = df[df.apply(is_itc_row, axis=1)].copy()
             if run_scope_df.empty:
                 logging.warning("ITC Autorouter mode found no FDITC000/FDITCALJ rows to process.")
@@ -1266,7 +1414,8 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
         else:
             run_scope_df = df
 
-        completed_status_mask = _completed_status_mask(run_scope_df)
+        smd_date_cleanup = not any((dar_mode, wc_mode, mspb_mode, itc_mode, irsplr_mode, ohtax0_mode, mnsutb_mode, mework_mode, mosu00_mode, fcc_mode, ferc_mode, nlrb_mode))
+        completed_status_mask = _completed_status_mask(run_scope_df, smd_date_cleanup=smd_date_cleanup)
         df_filtered = run_scope_df[~completed_status_mask].copy()
         completed_count = int(completed_status_mask.sum())
         if completed_count:
@@ -1280,16 +1429,16 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
             result_counts = _empty_result_counts()
             user_name = clean_display_name(get_full_username())
             if show_success:
-                show_success(user_name, *result_counts)
+                show_success(user_name, *result_counts, summarize_statuses_for_rows(run_scope_df))
             return pd.DataFrame(), pd.DataFrame()
 
         config = load_config()
         headless_mode = config.get("headless", False)
-        current_mode = "mspb" if mspb_mode else "itc" if itc_mode else "irsplr" if irsplr_mode else "ohtax0" if ohtax0_mode else "mnsutb" if mnsutb_mode else "mework" if mework_mode else "mosu00" if mosu00_mode else "dar" if dar_mode else "smd"
+        current_mode = "nlrb" if nlrb_mode else "ferc" if ferc_mode else "fcc" if fcc_mode else "mspb" if mspb_mode else "itc" if itc_mode else "irsplr" if irsplr_mode else "ohtax0" if ohtax0_mode else "mnsutb" if mnsutb_mode else "mework" if mework_mode else "mosu00" if mosu00_mode else "dar" if dar_mode else "smd"
         start_critical_error_run(latest_excel=latest_excel, mode=current_mode, config=config)
         logging.info(f"Headless mode setting: {headless_mode}")
 
-        if _get_parallel_enabled(config):
+        if _get_parallel_enabled(config) and not (fcc_mode or ferc_mode):
             if mspb_mode:
                 return _run_parallel_mspb_workflow(
                     update_progress=update_progress,
@@ -1320,17 +1469,23 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
                 mnsutb_mode=mnsutb_mode,
                 mework_mode=mework_mode,
                 mosu00_mode=mosu00_mode,
+                nlrb_mode=nlrb_mode,
             )
 
         chrome_options = Options()
         chrome_options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
-        mspb_download_dir = Path.home() / "Downloads" / "Case Law Auto-Routing Resources" / "MSPB PDF Downloads"
-        mspb_download_dir.mkdir(parents=True, exist_ok=True)
+        document_download_dir = (
+            Path.home()
+            / "Downloads"
+            / "Case Law Auto-Routing Resources"
+            / ("NLRB PDF Downloads" if nlrb_mode else "FERC PDF Downloads" if ferc_mode else "FCC PDF Downloads" if fcc_mode else "MSPB PDF Downloads")
+        )
+        document_download_dir.mkdir(parents=True, exist_ok=True)
         chrome_options.add_experimental_option("prefs", {
-            "download.default_directory": str(mspb_download_dir),
+            "download.default_directory": str(document_download_dir),
             "download.prompt_for_download": False,
             "download.directory_upgrade": True,
-            "plugins.always_open_pdf_externally": True,
+            "plugins.always_open_pdf_externally": not irsplr_mode,
             "safebrowsing.enabled": True,
         })
         if headless_mode:
@@ -1416,6 +1571,17 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
         router = create_router(driver, show_error=show_error,
                                set_status=set_status) if create_router else CaseLawRouter(driver, show_error=show_error,
                                                                                           set_status=set_status)
+        if fcc_mode:
+            # Keep Chrome's initial download preference and the router's
+            # attachment-style PDF fallback on the same dedicated folder.
+            router.fcc_download_dir = document_download_dir
+            router.fcc_download_dir.mkdir(parents=True, exist_ok=True)
+        if ferc_mode:
+            router.ferc_download_dir = document_download_dir
+            router.ferc_download_dir.mkdir(parents=True, exist_ok=True)
+        if nlrb_mode:
+            router.nlrb_download_dir = document_download_dir
+            router.nlrb_download_dir.mkdir(parents=True, exist_ok=True)
         logging.info("Router instance created. Clicking Search Inventory...")
         if not _open_search_inventory_with_recovery(router, driver, env_url, "single router"):
             raise RuntimeError("Router could not open Search Inventory before processing rows.")
@@ -1433,7 +1599,7 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
         counsel_df = pd.DataFrame()
         main_df = pd.DataFrame()
 
-        set_status("MSPB Batch Started" if mspb_mode else "ITC Batch Started" if itc_mode else "IRSPLR Batch Started" if irsplr_mode else "OHTAX0 Batch Started" if ohtax0_mode else "MNSUTB Batch Started" if mnsutb_mode else "MEWORK Batch Started" if mework_mode else "MOSU00 Batch Started" if mosu00_mode else "Counsel Batch Started")
+        set_status("NLRB Batch Started" if nlrb_mode else "FERC Batch Started" if ferc_mode else "FCC Batch Started" if fcc_mode else "MSPB Batch Started" if mspb_mode else "ITC Batch Started" if itc_mode else "IRSPLR Batch Started" if irsplr_mode else "OHTAX0 Batch Started" if ohtax0_mode else "MNSUTB Batch Started" if mnsutb_mode else "MEWORK Batch Started" if mework_mode else "MOSU00 Batch Started" if mosu00_mode else "Counsel Batch Started")
         counsel_df, main_df = router.process_rows(
             df_filtered,
             latest_excel,
@@ -1447,7 +1613,23 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
             mnsutb_mode=mnsutb_mode,
             mework_mode=mework_mode,
             mosu00_mode=mosu00_mode,
+            fcc_mode=fcc_mode,
+            ferc_mode=ferc_mode,
+            nlrb_mode=nlrb_mode,
         )
+
+        if (itc_mode or nlrb_mode) and not _itc_pre_save_recovery_rows(df_filtered, nlrb_mode=nlrb_mode).empty:
+            # A refresh of the old driver was already exhausted. Quit it
+            # before opening the bounded fresh-session recovery pass.
+            try:
+                driver.quit()
+            except Exception:
+                logging.warning("Could not fully close the initial browser before recovery.", exc_info=True)
+            driver = None
+            _recover_itc_pre_save_failures(
+                df_filtered, df, latest_excel, config, driver_path, env_url, 1,
+                create_router=create_router, show_error=show_error, set_status=set_status, nlrb_mode=nlrb_mode,
+            )
 
         rerun_summary = finalize_rerun_ready_statuses(
             df=df,
@@ -1468,13 +1650,23 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
             mework_mode=mework_mode,
             mosu00_mode=mosu00_mode,
             current_run_only=True,
+            nlrb_mode=nlrb_mode,
         )
         counsel_success, main_success, counsel_already, main_already, counsel_timeout, main_timeout = result_counts
 
         user_name = clean_display_name(get_full_username())
 
         if show_success:
-            show_success(user_name, counsel_success, main_success, counsel_already, main_already, counsel_timeout, main_timeout)
+            show_success(
+                user_name,
+                counsel_success,
+                main_success,
+                counsel_already,
+                main_already,
+                counsel_timeout,
+                main_timeout,
+                rerun_summary,
+            )
         else:
             logging.warning("show_success is None, final success signal not emitted!")
 
@@ -1506,6 +1698,7 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
                     "counsel_timeout": counsel_timeout,
                     "main_timeout": main_timeout,
                 },
+                run_status_summary=rerun_summary,
                 context="Single router run completed.",
                 config=config,
             )
@@ -1520,7 +1713,7 @@ def run_automation_workflow(update_progress=None, set_status=None, show_success=
         tb = traceback.format_exc()
         logging.error(f"Unexpected error during Run: {e}")
         logging.error(f"Full traceback: {tb}")
-        current_mode = locals().get("current_mode", "mspb" if mspb_mode else "itc" if itc_mode else "irsplr" if irsplr_mode else "ohtax0" if ohtax0_mode else "mnsutb" if mnsutb_mode else "mework" if mework_mode else "mosu00" if mosu00_mode else "dar" if dar_mode else "smd")
+        current_mode = locals().get("current_mode", "nlrb" if nlrb_mode else "ferc" if ferc_mode else "fcc" if fcc_mode else "mspb" if mspb_mode else "itc" if itc_mode else "irsplr" if irsplr_mode else "ohtax0" if ohtax0_mode else "mnsutb" if mnsutb_mode else "mework" if mework_mode else "mosu00" if mosu00_mode else "dar" if dar_mode else "smd")
         rerun_summary = finalize_rerun_ready_statuses(
             df=df,
             latest_excel=latest_excel,

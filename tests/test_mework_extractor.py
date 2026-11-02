@@ -8,6 +8,7 @@ from core.mework_extractor import (
     is_mework_row,
     parse_mework_document_text,
 )
+from core.irsplr_extractor import is_irsplr_row
 
 
 class MEWORKExtractorTests(unittest.TestCase):
@@ -60,29 +61,62 @@ class MEWORKExtractorTests(unittest.TestCase):
         self.assertTrue(metadata.used_filename_date_fallback)
         self.assertEqual(extract_mework_date_from_filename("Plamondon_Tammy07162026dec.pdf"), "07-16-2026")
 
-    def test_exclusion_requires_an_operative_heading_not_body_mention(self):
+    def test_appellate_division_decided_label_is_a_mework_decision_date(self):
+        text = """
+        STATE OF MAINE WORKERS' COMPENSATION BOARD APPELLATE DIVISION
+        Case No. App. Div. 26-0002
+        Decision No. 26-10
+        Decided: October 8, 2026
+        """ + ("Appellate decision analysis. " * 40)
+
+        metadata = parse_mework_document_text(text, "26-10_Weiss-v-Maine-Soapstone-Co-_20261008.pdf")
+
+        self.assertEqual(metadata.docket_number, "26-0002")
+        self.assertEqual(metadata.decision_date, "10-08-2026")
+        self.assertEqual(metadata.source_detail, "Opinion")
+        self.assertFalse(metadata.used_filename_date_fallback)
+
+    def test_mework_court_code_wins_when_filename_also_matches_irsplr(self):
+        row = {
+            "CourtCode": "STMEWORK",
+            "FileName": "26-10_Weiss-v-Maine-Soapstone-Co-_20261008.pdf",
+        }
+
+        self.assertTrue(is_mework_row(row))
+        self.assertTrue(is_irsplr_row(row))
+
+    def test_standalone_decree_is_included_but_clerical_correction_remains_excluded(self):
         standard_text = """
         Issuance Date: 2/28/2025
         Case#: 23021622B
         DECISION
         The procedural history mentions an older consent decree and a correction for clerical error.
         """ + ("Standard opinion analysis. " * 40)
-        excluded_text = """
+        decree_text = """
+        Issuance Date: 06/11/2024
+        Case#: 13-01-56-98C
+        DECREE
+        """ + ("Operative ruling text. " * 40)
+        correction_text = """
         Issuance Date: 06/11/2024
         Case#: 13-01-56-98C
         DECREE AMENDED PURSUANT TO MOTION TO CORRECT CLERICAL ERROR
         """ + ("Operative ruling text. " * 40)
 
         standard = parse_mework_document_text(standard_text, "Alimandi_Gwen02282025dec.pdf")
-        excluded = parse_mework_document_text(excluded_text, "Ariza_Roderick06112024decam2.pdf")
+        decree = parse_mework_document_text(decree_text, "Ariza_Roderick06112024decam2.pdf")
+        correction = parse_mework_document_text(correction_text, "Ariza_Roderick06112024decam2.pdf")
 
         self.assertFalse(standard.is_excluded)
         self.assertEqual(standard.source_detail, "Opinion")
-        self.assertTrue(excluded.is_excluded)
-        self.assertEqual(excluded.source_detail, "Excluded")
-        self.assertTrue(excluded.comments_text.startswith("Exclude - Correction for Clerical Error"))
+        self.assertFalse(decree.is_excluded)
+        self.assertEqual(decree.source_detail, "Opinion")
+        self.assertNotIn("Exclude -", decree.comments_text)
+        self.assertTrue(correction.is_excluded)
+        self.assertEqual(correction.source_detail, "Excluded")
+        self.assertTrue(correction.comments_text.startswith("Exclude - Correction for Clerical Error"))
 
-    def test_specific_exclusion_heading_outranks_generic_decision_heading(self):
+    def test_amended_consent_decree_remains_excluded(self):
         text = """
         Issuance Date: 06/11/2024
         Case#: 13-01-56-98C

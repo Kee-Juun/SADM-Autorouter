@@ -320,6 +320,7 @@ def flush_status_updates(file_path: str, status_map: dict[int, str], mspb_metada
         status_styles = {
             "DONE": {"bold": True, "color": "00A86B"},
             "ALREADY PROCESSED": {"bold": True, "color": "4F39BC"},
+            "DECISION DATE UPDATED": {"bold": True, "color": "4F39BC"},
             "PROCESSING": {"bold": True, "color": "1F4E79"},
             "NEEDS RERUN - SEARCH FAILED": {"bold": True, "color": "C00000"},
             "NEEDS RERUN - INTERRUPTED": {"bold": True, "color": "C65911"},
@@ -332,6 +333,10 @@ def flush_status_updates(file_path: str, status_map: dict[int, str], mspb_metada
             "ERROR": {"bold": True, "color": "E3242B"},
             "RELATED LNI ERROR": {"bold": True, "color": "E3242B"},
             "NO COUNSEL ATTACHED": {"bold": True, "color": "E3242B"},
+            "NEEDS REVIEW": {"bold": True, "color": "C65911"},
+            "ERRATA FOR REVIEW": {"bold": True, "color": "C65911"},
+            "ERRATA ATTACHMENT FOR REVIEW": {"bold": True, "color": "C65911"},
+            "ATTACHMENT FOR REVIEW": {"bold": True, "color": "C65911"},
         }
 
         for row_index, status in status_map.items():
@@ -340,6 +345,15 @@ def flush_status_updates(file_path: str, status_map: dict[int, str], mspb_metada
 
             style = status_styles.get(status, {"bold": False, "color": "000000"})
             cell.font = Font(bold=style["bold"], color=style["color"])
+
+        # Link-based routers can start with only Court Code and LNI. Once IRT
+        # resolves that LNI's File Name link, preserve the actual filename in
+        # the Mapping Data sheet as well as the PDF Metadata audit sheet.
+        if mspb_metadata_map:
+            for row_index, record in mspb_metadata_map.items():
+                file_name = str(record.get("File Name", "") or "").strip()
+                if file_name and file_name.lower() not in {"nan", "none", "nat"}:
+                    ws.cell(row=row_index + 2, column=3).value = file_name
 
         # Autofit all columns
         _autofit_columns(ws)

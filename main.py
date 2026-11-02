@@ -20,6 +20,7 @@ from frontend.pyqt_logging import install_qt_message_filter, setup_logging
 # Import resource_path for asset handling
 from core.smducar_config import resource_path
 from core.critical_error_notifier import notify_critical_error
+from core.build_info import build_version_footer
 
 
 def install_global_exception_hook():
@@ -47,6 +48,7 @@ def install_global_exception_hook():
 def main():
     # Set up logging
     setup_logging()
+    logging.info(build_version_footer().replace("\n", " | "))
     install_qt_message_filter()
     install_global_exception_hook()
     
@@ -88,6 +90,12 @@ def main():
                 app_name = "MEWORK Autorouter"
             elif mode == "mosu00":
                 app_name = "MOSU Autorouter"
+            elif mode == "fcc":
+                app_name = "FCC Autorouter"
+            elif mode == "ferc":
+                app_name = "FERC Autorouter"
+            elif mode == "nlrb":
+                app_name = "NLRB Autorouter"
             elif mode == "dar":
                 app_name = "DAR Autoruter"
             else:

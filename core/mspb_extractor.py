@@ -41,8 +41,10 @@ class MSPBMetadata:
     title_hint: str = ""
 
 
-def extract_text_from_pdf_bytes(pdf_bytes: bytes, use_ocr_fallback: bool = True) -> str:
+def extract_text_from_pdf_bytes(pdf_bytes: bytes, use_ocr_fallback: bool = True, *, force_ocr: bool = False) -> str:
     """Extract text from PDF bytes, with an optional OCR fallback for image PDFs."""
+    if force_ocr:
+        return _extract_text_with_optional_ocr(pdf_bytes) if use_ocr_fallback else ""
     text = _extract_text_with_pypdf(pdf_bytes)
     if text.strip():
         return text

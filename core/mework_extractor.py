@@ -145,7 +145,7 @@ def extract_mework_decision_date(text: str) -> Optional[str]:
     date_pattern = _date_pattern()
     patterns = (
         rf"(?im)^\s*Dated\s*:\s*({date_pattern})",
-        rf"(?im)^\s*(?:Issuance\s+Date|Date\s+Issued)\s*:\s*({date_pattern})",
+        rf"(?im)^\s*(?:Decided|Decision\s+Date|Issuance\s+Date|Date\s+Issued)\s*:\s*({date_pattern})",
         rf"(?im)^\s*(?:Mail\s+Date|Date\s+Mailed)\s*:\s*({date_pattern})",
     )
     for pattern in patterns:
@@ -178,8 +178,9 @@ def find_mework_title_hint(text: str) -> str:
         if _looks_like_heading(line):
             heading_candidates.append(label)
 
-    # Specific operative headings outrank a generic DECISION or ORDER label
-    # that may appear earlier on the first page.
+    # Specific exclusion headings outrank a generic DECISION or ORDER label
+    # that may appear earlier on the first page.  A standalone DECREE is not
+    # in this list: management directed that it be included.
     for label in heading_candidates:
         if label == "AMENDED CONSENT DECREE":
             return "Amended Consent Decree"
@@ -187,8 +188,6 @@ def find_mework_title_hint(text: str) -> str:
             return "Consent Decree"
         if "CORRECTION FOR CLERICAL ERROR" in label or "CORRECT CLERICAL ERROR" in label:
             return "Correction for Clerical Error"
-        if label == "DECREE":
-            return "Decree"
     for label in heading_candidates:
         if re.fullmatch(r"FURTHER\s+FINDINGS\s+OF\s+FACT(?:S)?\s+AND\s+CONCLUSIONS\s+OF\s+LAW", label):
             return "Further Findings of Fact and Conclusions of Law"
@@ -201,6 +200,9 @@ def find_mework_title_hint(text: str) -> str:
 
 
 def classify_mework_exclusion(title_hint: str) -> str:
+    # Management confirmed only a standalone DECREE is included.  Consent
+    # Decree, Amended Consent Decree, and clerical-error corrections retain
+    # their established exclusion workflow.
     label = _normalize_label(title_hint)
     if label == "AMENDED CONSENT DECREE":
         return "Amended Consent Decree"
@@ -208,8 +210,6 @@ def classify_mework_exclusion(title_hint: str) -> str:
         return "Consent Decree"
     if "CORRECTION FOR CLERICAL ERROR" in label or "CORRECT CLERICAL ERROR" in label:
         return "Correction for Clerical Error"
-    if label == "DECREE":
-        return "Decree"
     return ""
 
 

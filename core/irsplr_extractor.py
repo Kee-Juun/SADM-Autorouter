@@ -12,6 +12,7 @@ import datetime
 import logging
 import re
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +23,99 @@ IRSPLR_QUEUE_CODE = "FDIRSPLR"
 IRSPLR_OUTPUT_COURTS = {"FDPLR000", "FDCCA001"}
 IRSPLR_ALL_COURTS = {IRSPLR_QUEUE_CODE, *IRSPLR_OUTPUT_COURTS}
 IRSPLR_EXCLUDED_DOCKET = "NO NUMBER IN ORIGINAL"
+
+
+class IRSPLRDocumentReviewRequired(ValueError):
+    """The source document cannot safely authorize normal content routing."""
+
+
+class IRSPLRCorruptDocument(IRSPLRDocumentReviewRequired):
+    """A verified invalid file or failed PDF viewer authorizes corrupt exclusion."""
+
+
+def validate_irsplr_pdf_bytes(pdf_bytes: bytes) -> None:
+    """Separate verified invalid formats from uncertain PDF/OCR failures.
+
+    OCR can read a bitmap named .pdf even when Chrome cannot open it. Metadata
+    recovered from that bitmap does not make the source a usable PDF.
+    """
+    if not pdf_bytes:
+        raise IRSPLRDocumentReviewRequired("UNAVAILABLE - the download is empty; a corrupt file has not been verified")
+    if not pdf_bytes.lstrip(b" \t\r\n").startswith(b"%PDF-"):
+        if pdf_bytes.lstrip().startswith(b"<"):
+            raise IRSPLRDocumentReviewRequired("UNAVAILABLE - the server returned an HTML/error page instead of a PDF; corruption is not verified")
+        # These are file-format signatures, not an OCR/readability test. An
+        # unknown response can be a login/service error or unusual PDF header.
+        replacement_signatures = (
+            b"BM", b"\x89PNG\r\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a",
+            b"II*\x00", b"MM\x00*", b"PK\x03\x04", b"{\\rtf",
+        )
+        if pdf_bytes.startswith(replacement_signatures):
+            raise IRSPLRCorruptDocument("CORRUPT OR INVALID FILE - the downloaded content is not a PDF (another file format was identified)")
+        raise IRSPLRDocumentReviewRequired("UNRECOGNIZED DOWNLOAD - no PDF header or known replacement file format; corruption is not verified")
+    needs_render_validation = False
+    if not re.search(rb"%%EOF[\x00\t\n\f\r ]*\Z", pdf_bytes):
+        # Some replacement PLRs have a complete original EOF followed only
+        # by an empty incremental xref/trailer whose final F became NUL.
+        # Recognize that narrow case, not arbitrary bytes after an old EOF
+        # that might hide incomplete new pages/content.
+        end = pdf_bytes.rfind(b"%%EOF")
+        tail = pdf_bytes[end + 5:] if end >= 0 else b""
+        needs_render_validation = bool(
+            end >= 0 and len(tail) <= 4096
+            and re.match(rb"\s*xref\s+0\s+0\s+trailer\b", tail)
+            and re.search(rb"startxref\s+\d+\s+%%EO\x00[\x00\t\n\f\r ]*\Z", tail)
+            and not re.search(rb"\b(?:obj|endobj|stream|endstream)\b", tail)
+        )
+        # A viewer may recover a missing trailer. Never exclude solely for a
+        # strict-parser requirement, unsupported encoding, or repairable defect.
+        if not needs_render_validation:
+            raise IRSPLRDocumentReviewRequired("POSSIBLY TRUNCATED OR NONSTANDARD PDF - the final PDF end marker is missing or followed by unexpected data; corruption is not verified")
+    try:
+        from pypdf import PdfReader
+        from pypdf.errors import DependencyError
+    except ImportError as exc:
+        raise IRSPLRDocumentReviewRequired("VALIDATION UNAVAILABLE - PDF validation dependencies could not be loaded") from exc
+
+    try:
+        reader = PdfReader(BytesIO(pdf_bytes), strict=True)
+        if reader.is_encrypted and not reader.decrypt(""):
+            raise IRSPLRDocumentReviewRequired("PASSWORD PROTECTED - supply an unlocked PDF; corruption is not verified")
+        if len(reader.pages) == 0:
+            raise IRSPLRCorruptDocument("CORRUPT PDF - the file has no pages")
+        for page in reader.pages:
+            # Force page/content references to resolve, rather than treating
+            # a surviving header or recoverable first-page text as proof.
+            contents = page.get_contents()
+            if contents is not None:
+                contents.get_data()
+        if needs_render_validation:
+            _validate_irsplr_nonstandard_trailer_rendering(pdf_bytes, len(reader.pages))
+    except IRSPLRDocumentReviewRequired:
+        raise
+    except DependencyError as exc:
+        raise IRSPLRDocumentReviewRequired("VALIDATION UNAVAILABLE - required PDF decryption support is missing") from exc
+    except Exception as exc:
+        raise IRSPLRDocumentReviewRequired("PDF VALIDATION INCONCLUSIVE - structural validation failed; supply a working PDF or review it manually; corruption is not verified") from exc
+
+
+def _validate_irsplr_nonstandard_trailer_rendering(pdf_bytes: bytes, expected_pages: int) -> None:
+    """Require independent, complete page rendering for the known trailer quirk."""
+    try:
+        import fitz
+
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
+            if document.needs_pass or document.page_count != expected_pages:
+                raise ValueError("PDF readers disagree about accessible pages")
+            for page in document:
+                pixels = page.get_pixmap(matrix=fitz.Matrix(0.5, 0.5), alpha=False)
+                if pixels.width <= 0 or pixels.height <= 0:
+                    raise ValueError("a page could not be rendered")
+    except Exception as exc:
+        raise IRSPLRDocumentReviewRequired(
+            "PDF VALIDATION INCONCLUSIVE - the nonstandard trailer could not be independently checked on every page; corruption is not verified"
+        ) from exc
+    logging.info("IRSPLR nonstandard PDF trailer accepted after structural validation and independent rendering of all %d pages.", expected_pages)
 
 
 @dataclass(frozen=True)
@@ -37,6 +131,23 @@ class IRSPLRMetadata:
     is_excluded: bool = False
     exclusion_reason: str = ""
     is_text_fallback: bool = False
+    is_verified_corrupt: bool = False
+
+
+def build_irsplr_corrupt_exclusion_metadata(court_code_hint=None, reason="") -> IRSPLRMetadata:
+    """Authorize exclusion only, without inventing unreadable docket/date values."""
+    court_hint = str(court_code_hint or "").strip().upper()
+    return IRSPLRMetadata(
+        court=court_hint if court_hint in IRSPLR_OUTPUT_COURTS else "",
+        docket_number="",
+        decision_date="",
+        source_detail="Excluded",
+        comments_text="Exclude - Corrupt File",
+        title_hint="Verified corrupt file",
+        is_excluded=True,
+        exclusion_reason=reason or "Corrupt File",
+        is_verified_corrupt=True,
+    )
 
 
 def is_irsplr_court_code(court_code) -> bool:
@@ -87,11 +198,25 @@ def parse_irsplr_pdf_bytes(
     court_code_hint: Optional[str] = None,
     use_ocr_fallback: bool = True,
 ) -> Optional[IRSPLRMetadata]:
-    text = extract_text_from_pdf_bytes(pdf_bytes, use_ocr_fallback=use_ocr_fallback)
-    if not text.strip():
-        logging.warning("IRSPLR PDF text extraction returned no text.")
-    return parse_irsplr_document_text(
+    validate_irsplr_pdf_bytes(pdf_bytes)
+    text = extract_text_from_pdf_bytes(pdf_bytes, use_ocr_fallback=False)
+    metadata = parse_irsplr_document_text(
         text,
+        filename_hint=filename_hint,
+        court_code_hint=court_code_hint,
+    )
+    if metadata is not None or not use_ocr_fallback:
+        return metadata
+
+    # A partial text layer (e.g. a watermark) must not suppress OCR of the
+    # actual scan. OCR trouble never changes the file-validation outcome.
+    logging.info("IRSPLR native text has incomplete metadata; trying Tesseract OCR on the validated PDF.")
+    ocr_text = extract_text_from_pdf_bytes(pdf_bytes, force_ocr=True)
+    if not ocr_text.strip():
+        logging.warning("IRSPLR PDF passed validation but OCR returned no text; manual review is required, not corrupt exclusion.")
+        return None
+    return parse_irsplr_document_text(
+        ocr_text,
         filename_hint=filename_hint,
         court_code_hint=court_code_hint,
     )

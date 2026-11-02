@@ -21,6 +21,10 @@ class IRTDocumentProfile:
     lni: str
     pdf_sha256: str
     normalized_text: str
+    is_verified_pdf: bool = False
+    is_verified_corrupt: bool = False
+    validation_reason: str = ""
+    is_browser_verified: bool = False
 
 
 @dataclass(frozen=True)
@@ -31,13 +35,29 @@ class IRTDuplicateMatch:
     similarity: float
 
 
-def build_document_profile(lni: str, pdf_bytes: bytes) -> IRTDocumentProfile:
+def build_document_profile(lni: str, pdf_bytes: bytes, *, verify_pdf: bool = False) -> IRTDocumentProfile:
     """Create a comparable profile from the IRT-hosted document bytes."""
+    if verify_pdf:
+        from .irsplr_extractor import IRSPLRCorruptDocument, validate_irsplr_pdf_bytes
+
+        try:
+            validate_irsplr_pdf_bytes(pdf_bytes)
+        except IRSPLRCorruptDocument as exc:
+            # OCR-readable text in a bitmap or broken source cannot make it
+            # a usable original against which to archive a valid replacement.
+            return IRTDocumentProfile(
+                lni=str(lni or "").strip().upper(),
+                pdf_sha256=hashlib.sha256(pdf_bytes).hexdigest(),
+                normalized_text="",
+                is_verified_corrupt=True,
+                validation_reason=str(exc),
+            )
     text = extract_text_from_pdf_bytes(pdf_bytes, use_ocr_fallback=True)
     return IRTDocumentProfile(
         lni=str(lni or "").strip().upper(),
         pdf_sha256=hashlib.sha256(pdf_bytes).hexdigest(),
         normalized_text=normalize_document_text(text),
+        is_verified_pdf=verify_pdf,
     )
 
 
@@ -51,6 +71,8 @@ def compare_document_profiles(
     candidate: IRTDocumentProfile,
 ) -> IRTDuplicateMatch:
     """Confirm only exact or extremely close substantial document matches."""
+    if current.is_verified_corrupt or candidate.is_verified_corrupt:
+        return IRTDuplicateMatch(candidate.lni, False, "verified corrupt source is not a usable duplicate", 0.0)
     if current.pdf_sha256 == candidate.pdf_sha256:
         return IRTDuplicateMatch(candidate.lni, True, "identical PDF", 1.0)
 

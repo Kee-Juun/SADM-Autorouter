@@ -15,6 +15,7 @@ from typing import Any
 
 from .smducar_config import error_log_entries, load_config, status_updates_buffer
 from .rerun_status import RERUN_STATUS_PREFIX, summarize_statuses_for_rows
+from .build_info import build_version_footer, get_build_info
 
 
 DEFAULT_DEVELOPER_EMAIL = "kevinjohn.libuna@reedelsevier.com"
@@ -154,12 +155,15 @@ def _document_result_label(mode):
         "mnsutb": "MNSUTB documents",
         "mework": "MEWORK documents",
         "mosu00": "MOSU main/table documents",
+        "fcc": "FCC documents",
+        "ferc": "FERC documents",
+        "nlrb": "NLRB documents",
     }
     return labels.get(normalized, "Main opinions")
 
 
 def _is_document_only_mode(mode):
-    return str(mode or "").strip().lower() in {"mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mework"}
+    return str(mode or "").strip().lower() in {"mspb", "itc", "irsplr", "ohtax0", "mnsutb", "mework", "fcc", "ferc", "nlrb"}
 
 
 def _mode_display_name(mode):
@@ -172,6 +176,9 @@ def _mode_display_name(mode):
         "mnsutb": "MNSUTB Autorouter",
         "mework": "MEWORK Autorouter",
         "mosu00": "MOSU Autorouter",
+        "fcc": "FCC Autorouter",
+        "ferc": "FERC Autorouter",
+        "nlrb": "NLRB Autorouter",
         "dar": "DAR Autoruter",
         "smd": "SMD Autorouter",
     }
@@ -738,6 +745,8 @@ def _format_run_status_counts(summary):
     lines = [
         _format_count_line("Rows marked DONE", summary.get("done_count", 0)),
         _format_count_line("Rows already processed", summary.get("already_processed_count", 0)),
+        _format_count_line("Decision dates updated", summary.get("decision_date_updated_count", 0)),
+        _format_count_line("Rows requiring manual review", summary.get("manual_review_count", 0)),
         _format_count_line("Rows needing rerun", summary.get("needs_rerun_count", 0)),
     ]
     for status, count in sorted(counts.items()):
@@ -761,6 +770,23 @@ def _format_run_status_examples(summary, max_rows=12):
     extra_count = max(0, len(rows) - max_rows)
     if extra_count:
         lines.append(f"- ...and {extra_count} more row(s).")
+    return lines
+
+
+def _format_manual_review_examples(summary, max_rows=12):
+    rows = (summary or {}).get("manual_review_rows") or []
+    if not rows:
+        return []
+
+    lines = ["Manual-review documents:"]
+    for row in rows[:max_rows]:
+        lni = row.get("LNI") or "N/A"
+        filename = row.get("File Name") or "Unknown file"
+        status = row.get("Status") or "NEEDS REVIEW"
+        lines.append(f"- {filename} - {lni} ({status})")
+    extra_count = max(0, len(rows) - max_rows)
+    if extra_count:
+        lines.append(f"- ...and {extra_count} more document(s).")
     return lines
 
 
@@ -930,11 +956,13 @@ def _build_critical_email_body(payload, report_dir, theme=None):
         "",
         theme["closer"],
         "- Your SMD Autorouter",
+        "",
+        build_version_footer(payload.get("build_info")),
     ])
     return "\n".join(lines)
 
 
-def _build_success_email_body(mode, counts, report_dir, theme=None):
+def _build_success_email_body(mode, counts, report_dir, theme=None, run_status_summary=None, build_info=None):
     theme = theme or _success_email_theme()
     counts = counts or {}
     document_label = _document_result_label(mode)
@@ -948,6 +976,8 @@ def _build_success_email_body(mode, counts, report_dir, theme=None):
     total_routed = counsel_success + document_success
     total_already = counsel_already + document_already
     total_timeouts = counsel_timeout + document_timeout
+    manual_review_count = int((run_status_summary or {}).get("manual_review_count", 0) or 0)
+    date_updated_count = int((run_status_summary or {}).get("decision_date_updated_count", 0) or 0)
 
     document_only_mode = _is_document_only_mode(mode)
     lines = [
@@ -974,6 +1004,9 @@ def _build_success_email_body(mode, counts, report_dir, theme=None):
             _format_count_line("Counsel already processed", counsel_already),
         ])
 
+    if date_updated_count:
+        lines.append(_format_count_line("Decision dates updated (no new routing)", date_updated_count))
+
     if total_timeouts:
         lines.append(_format_count_line("Related-LNI timeouts", total_timeouts))
         if document_only_mode:
@@ -984,6 +1017,15 @@ def _build_success_email_body(mode, counts, report_dir, theme=None):
                 _format_count_line("Counsel timeouts", counsel_timeout),
             ])
 
+    if manual_review_count:
+        lines.extend([
+            "",
+            "Manual review required:",
+            _format_count_line("Documents skipped safely", manual_review_count),
+            "No IRT changes were made for these documents.",
+            *_format_manual_review_examples(run_status_summary),
+        ])
+
     lines.extend([
         "",
         theme["attachments"],
@@ -993,6 +1035,8 @@ def _build_success_email_body(mode, counts, report_dir, theme=None):
         "",
         theme["closer"],
         "- Your SMD Autorouter",
+        "",
+        build_version_footer(build_info),
     ])
     return "\n".join(lines)
 
@@ -1112,6 +1156,7 @@ def _write_summary(report_dir, payload, log_copy=None):
         "SMD Autorouter Critical Error Report",
         "=" * 39,
         f"Generated: {payload.get('timestamp')}",
+        build_version_footer(payload.get("build_info")),
         f"Machine: {payload.get('machine')}",
         f"User: {payload.get('windows_user')}",
         f"Run ID: {payload.get('run_id')}",
@@ -1193,6 +1238,7 @@ def notify_critical_error(
 
     payload = {
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "build_info": get_build_info(),
         "machine": socket.gethostname(),
         "windows_user": os.environ.get("USERNAME", ""),
         "run_id": run.get("run_id", ""),
@@ -1235,10 +1281,12 @@ def _write_run_summary(report_dir, payload, log_copy=None):
     counts = payload.get("result_counts") or {}
     document_label = _document_result_label(payload.get("mode"))
     document_sentence_label = document_label[:1].upper() + document_label[1:] if document_label else "Main opinions"
+    run_status_summary = payload.get("run_status_summary") or {}
     lines = [
         "SMD Autorouter Run Summary",
         "=" * 28,
         f"Generated: {payload.get('timestamp')}",
+        build_version_footer(payload.get("build_info")),
         f"Machine: {payload.get('machine')}",
         f"User: {payload.get('windows_user')}",
         f"Run ID: {payload.get('run_id')}",
@@ -1258,6 +1306,19 @@ def _write_run_summary(report_dir, payload, log_copy=None):
         str(payload.get("context") or "N/A"),
     ]
 
+    manual_review_count = int(run_status_summary.get("manual_review_count", 0) or 0)
+    if run_status_summary.get("decision_date_updated_count"):
+        lines.extend(["", f"Decision dates updated (no new routing): {run_status_summary['decision_date_updated_count']}"])
+    if manual_review_count:
+        lines.extend([
+            "",
+            "Manual Review Required",
+            "----------------------",
+            f"Documents skipped safely: {manual_review_count}",
+            "No IRT changes were made for these documents.",
+            *_format_manual_review_examples(run_status_summary, max_rows=50),
+        ])
+
     log_tail = _tail_text(log_copy, max_lines=40)
     if log_tail:
         lines.extend(["", "Last Log Lines", "--------------", log_tail])
@@ -1272,6 +1333,7 @@ def notify_successful_run(
     latest_excel=None,
     mode=None,
     result_counts=None,
+    run_status_summary=None,
     context=None,
     config=None,
 ):
@@ -1288,6 +1350,7 @@ def notify_successful_run(
 
     latest_excel = latest_excel or run.get("latest_excel")
     mode = mode or run.get("mode")
+    run_status_summary = run_status_summary or summarize_statuses_for_rows(None)
     report_dir = _build_report_folder("Completed Run Summary", "Run Summary Reports")
 
     log_file = _get_current_log_file()
@@ -1296,12 +1359,14 @@ def notify_successful_run(
 
     payload = {
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "build_info": get_build_info(),
         "machine": socket.gethostname(),
         "windows_user": os.environ.get("USERNAME", ""),
         "run_id": run.get("run_id", ""),
         "mode": mode,
         "context": context or "",
         "result_counts": result_counts or {},
+        "run_status_summary": run_status_summary,
         "latest_excel": str(latest_excel or ""),
         "log_file": str(log_file or ""),
         "status_updates": {str(key): value for key, value in status_updates_buffer.items()},
@@ -1316,7 +1381,14 @@ def notify_successful_run(
     subject_mode = str(mode or "Autorouter").upper()
     email_theme = _success_email_theme()
     subject = _success_subject(subject_mode, payload["timestamp"], email_theme)
-    body = _build_success_email_body(mode, counts, report_dir, email_theme)
+    body = _build_success_email_body(
+        mode,
+        counts,
+        report_dir,
+        email_theme,
+        run_status_summary=run_status_summary,
+        build_info=payload["build_info"],
+    )
 
     try:
         _send_outlook_email(subject, body, attachments, config)
