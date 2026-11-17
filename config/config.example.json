@@ -1,0 +1,13 @@
+{
+  "headless": true,
+  "show_console": false,
+  "dar_mode": false,
+  "mode": "ferc",
+  "parallel_routers_enabled": true,
+  "parallel_lni_limit": 0,
+  "parallel_router_instances": 10,
+  "critical_error_email_enabled": "",
+  "run_summary_email_enabled": "",
+  "critical_error_developer_email": "",
+  "critical_error_user_email": ""
+}

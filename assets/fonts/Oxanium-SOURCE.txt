@@ -1,0 +1,6 @@
+Oxanium by Severin Meyer / The Oxanium Project Authors
+Unmodified variable font, bundled with its SIL Open Font License 1.1.
+
+Font: https://raw.githubusercontent.com/google/fonts/main/ofl/oxanium/Oxanium%5Bwght%5D.ttf
+License: https://raw.githubusercontent.com/google/fonts/main/ofl/oxanium/OFL.txt
+Project: https://github.com/sevmeyer/oxanium

@@ -6,28 +6,19 @@ import json
 import logging
 import traceback
 from pathlib import Path
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtGui import QIcon
-from PyQt5.QtCore import QCoreApplication, QTimer, QPropertyAnimation
 import ctypes
 
-# Import the main window class
-from frontend.smducar_pyqt import SMDUSAPGui
-
-# Import logging setup
-from frontend.pyqt_logging import install_qt_message_filter, setup_logging
-
-# Import resource_path for asset handling
-from core.smducar_config import resource_path
-from core.critical_error_notifier import notify_critical_error
-from core.build_info import build_version_footer
+from core.startup_progress import close_startup, fail_startup, report_startup
 
 
 def install_global_exception_hook():
     """Capture unexpected GUI/app exceptions in the critical report system."""
+    from core.critical_error_notifier import notify_critical_error
+
     original_hook = sys.excepthook
 
     def handle_exception(exc_type, exc_value, exc_traceback):
+        fail_startup(str(exc_value))
         if issubclass(exc_type, KeyboardInterrupt):
             original_hook(exc_type, exc_value, exc_traceback)
             return
@@ -45,16 +36,29 @@ def install_global_exception_hook():
     sys.excepthook = handle_exception
 
 
-def main():
+def _run_application():
+    report_startup("Loading Interface Libraries", 5)
+    from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtGui import QIcon
+    from PyQt5.QtCore import QCoreApplication, QTimer, QPropertyAnimation
+
+    report_startup("Loading App Components", 12)
+    from frontend.smducar_pyqt import SMDUSAPGui
+    from frontend.pyqt_logging import install_qt_message_filter, setup_logging
+    from core.smducar_config import resource_path
+    from core.build_info import build_version_footer
+
     # Set up logging
     setup_logging()
     logging.info(build_version_footer().replace("\n", " | "))
     install_qt_message_filter()
     install_global_exception_hook()
     
+    report_startup("Starting the Interface", 55)
     app = QApplication(sys.argv)
     
     # Set application icon (works in dev and PyInstaller)
+    report_startup("Loading App Icons", 59)
     try:
         base_path = getattr(sys, '_MEIPASS', os.path.abspath('.'))
         icon_path = Path(base_path) / 'assets' / 'icons' / 'silcrow.ico'
@@ -70,6 +74,7 @@ def main():
         app_icon = None
     
     # Determine application name based on config
+    report_startup("Reading Your Settings", 63)
     try:
         config_path = Path(resource_path('config')) / 'config.json'
         with open(config_path, 'r') as f:
@@ -113,6 +118,7 @@ def main():
         pass
     
     # Create and show the main window
+    report_startup("Building Your Workspace", 66)
     window = SMDUSAPGui()
     
     # Set window icon
@@ -121,6 +127,9 @@ def main():
     
     window.show()
     window.center_on_screen()
+    report_startup("Opening Your Workspace", 97)
+    # Let Qt paint the main window and complete its 400ms fade first.
+    QTimer.singleShot(450, close_startup)
     
     # Ensure the window icon is set after showing the window
     if app_icon:
@@ -138,10 +147,21 @@ def main():
         fade_anim.setEndValue(1.0)
         fade_anim.start()
     
-    sys.exit(app.exec_())
+    return app.exec_()
+
+
+def main():
+    try:
+        return _run_application()
+    except BaseException as exc:
+        fail_startup(str(exc))
+        raise
+    finally:
+        # Also close on import/initialization failures and early app exits.
+        close_startup()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
 
 

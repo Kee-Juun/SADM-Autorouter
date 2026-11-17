@@ -7,6 +7,34 @@ from .irsplr_extractor import IRSPLRCorruptDocument, IRSPLRDocumentReviewRequire
 
 
 def browser_pdf_state(driver, read_viewer_error):
+    state = _browser_pdf_state(driver, read_viewer_error)
+    if state != "loading":
+        return state
+    # Chrome 156 hosts the viewer in an iframe inside the body's closed
+    # browser shadow root. Page JS and Page.getFrameTree omit that frame.
+    # WebDriver's shadow-root API can enter it and read the actual viewer UI.
+    try:
+        for body in driver.find_elements("css selector", "body"):
+            try:
+                viewer_frames = body.shadow_root.find_elements(
+                    "css selector", "iframe[type='application/pdf']"
+                )
+            except Exception:
+                continue
+            for frame in viewer_frames:
+                driver.switch_to.frame(frame)
+                try:
+                    state = _browser_pdf_state(driver, read_viewer_error)
+                    if state != "loading":
+                        return state
+                finally:
+                    driver.switch_to.parent_frame()
+    except Exception:
+        logging.debug("IRSPLR PDF viewer frame not available yet.", exc_info=True)
+    return "loading"
+
+
+def _browser_pdf_state(driver, read_viewer_error):
     error = read_viewer_error()
     if error:
         return "failed"

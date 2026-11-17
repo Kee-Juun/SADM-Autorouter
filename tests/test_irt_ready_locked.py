@@ -90,6 +90,74 @@ class IRTReadyLockedTests(unittest.TestCase):
         self.assertIn("missing related counsel LNI", status)
         self.assertIn(self.COUNSEL, status)
 
+    def consolidated_main(self):
+        extra = "6M04-T873-S1S0-B2NS-00000-00"
+        self.df.loc[0, "RecycledCounselLNI"] = extra
+        return extra, self.COUNSEL + "\n" + extra
+
+    def test_consolidated_main_retains_intentional_saved_docket(self):
+        _, links = self.consolidated_main()
+        self.router.driver.execute_script.return_value = self.saved(False, docket="22-3063", related_lnis=links)
+        with patch("core.smducar_router.WebDriverWait", side_effect=self.alert_waits()):
+            status = self.router.open_and_process_form(self.df.loc[0], self.df, 0, "unused.xlsx")
+        self.assertEqual(status, "ALREADY PROCESSED")
+        self.assertEqual(status_updates_buffer[0], "ALREADY PROCESSED")
+        self.router.fill_irt_form.assert_not_called()
+        self.router.submit_irt_form.assert_not_called()
+        self.router.refresh_search_inventory_for_retry.assert_not_called()
+        self.router._cleanup_tabs.assert_called_once_with("irt", "search")
+
+    def test_consolidated_docket_still_requires_every_saved_link_and_field(self):
+        extra, links = self.consolidated_main()
+        for overrides, reason in (
+            ({"related_lnis": self.COUNSEL}, "missing related counsel LNI"),
+            ({"related_lnis": extra}, "missing related counsel LNI"),
+            ({"ready": False}, "saved Ready to Process"),
+            ({"route": "Inventory"}, "Route expected Outside Conversion"),
+            ({"decision_date": "10/23/2026"}, "Decision Date expected"),
+            ({"source_detail": "Opinion"}, "Source Detail expected Order"),
+            ({"docket": ""}, "Docket expected"),
+            ({"docket": "INITIALIZED"}, "Docket expected"),
+        ):
+            with self.subTest(overrides=overrides):
+                values = dict(docket="22-3063", related_lnis=links)
+                values.update(overrides)
+                self.assertIn(reason, self.verify(counsel=False, **values))
+
+    def test_consolidated_main_still_requires_explicit_comments(self):
+        _, links = self.consolidated_main()
+        self.df.loc[0, "Comments"] = "Retain consolidated docket"
+        self.assertIn("required Comments text missing", self.verify(counsel=False, docket="22-3063", related_lnis=links))
+
+    def test_primary_counsel_repeated_as_recycled_does_not_allow_other_docket(self):
+        self.df.loc[0, "RecycledCounselLNI"] = self.COUNSEL
+        self.assertIn("Docket expected", self.verify(counsel=False, docket="22-3063"))
+
+    def test_consolidation_does_not_relax_counsel_or_specialist_dockets(self):
+        _, links = self.consolidated_main()
+        self.assertIn("Docket expected", self.verify(docket="22-3063"))
+        metadata = SimpleNamespace(docket_number="26-7087", decision_date="10-22-2026", source_detail="Order")
+        self.router.driver.execute_script.return_value = self.saved(False, docket="22-3063", related_lnis=links)
+        self.assertIn("Docket expected", self.router.verify_ready_locked_form(self.df.loc[0], self.df, metadata=metadata))
+
+    def test_reported_consolidated_dockets_with_local_and_external_counsel(self):
+        for filename_docket, saved_docket, main_lni, recycled, primary in (
+            ("23-3217", "22-3063", "6M04-T873-S1S0-B2NY-00000-00",
+             "6M04-T873-S1S0-B2NS-00000-00; 6M04-T873-S1S0-B2P0-00000-00",
+             "6M04-T873-S1S0-B2NG-00000-00"),
+            ("25-1110", "25-1017", "6M04-T873-S1S0-B2NV-00000-00",
+             "6FCJ-CWX3-RVJS-734S-00000-00; 6FNT-MX73-RT8S-T265-00000-00; 6M04-T873-S1S0-B2NW-00000-00", ""),
+        ):
+            with self.subTest(main=main_lni):
+                rows = [{"FileName": f"smd_{filename_docket}_CADC_11_12_2026_0_151965905.pdf",
+                         "LNI": main_lni, "RecycledCounselLNI": recycled}]
+                if primary:
+                    rows.append({"FileName": f"smd_{filename_docket}_CADC_Counsel.csv", "LNI": primary})
+                df = pd.DataFrame(rows)
+                self.router.driver.execute_script.return_value = self.saved(False, docket=saved_docket,
+                    decision_date="11/12/2026", related_lnis=recycled + "\n" + primary)
+                self.assertEqual(self.router.verify_ready_locked_form(df.loc[0], df), "ALREADY PROCESSED")
+
     def test_counsel_requires_matching_main_lni_in_comments(self):
         status = self.verify(comments="unrelated comment")
         self.assertIn("missing main opinion LNI in Comments", status)
@@ -139,8 +207,34 @@ class IRTReadyLockedTests(unittest.TestCase):
 
     def test_missing_expected_date_cannot_be_verified_from_the_saved_date_itself(self):
         self.df["Decision Date"] = None
+        self.df.loc[0, "FileName"] = "smd_26-7087_CADC.pdf"
         status = self.verify()
         self.assertIn("expected decision date unavailable", status)
+
+    def test_smd_separated_filename_date_verifies_main_and_primary_counsel(self):
+        self.df["Decision Date"] = None
+        self.assertEqual(self.verify(counsel=False), "ALREADY PROCESSED")
+        self.assertEqual(self.verify(), "ALREADY PROCESSED")
+
+    def test_consolidated_counsel_uses_explicit_parent_date_without_inventing_comments(self):
+        self.df["Decision Date"] = None
+        self.df.loc[1, "FileName"] = "smd_23-3216_CADC_Counsel.csv"
+        self.df.loc[0, "RecycledCounselLNI"] = self.COUNSEL
+        self.router.driver.execute_script.return_value = self.saved(docket="23-3216", comments="")
+        self.assertEqual(self.router.verify_ready_locked_form(self.df.loc[1], self.df), "ALREADY PROCESSED")
+        self.router.driver.execute_script.return_value = self.saved(docket="23-3216", comments="", route="Inventory")
+        self.assertIn("Route expected Archive", self.router.verify_ready_locked_form(self.df.loc[1], self.df))
+        self.router.driver.execute_script.return_value = self.saved(docket="23-3216", comments="", decision_date="10/23/2026")
+        self.assertIn("Decision Date expected", self.router.verify_ready_locked_form(self.df.loc[1], self.df))
+
+    def test_unmapped_counsel_still_requires_review(self):
+        self.df.loc[1, "FileName"] = "smd_23-3216_CADC_Counsel.csv"
+        self.router.driver.execute_script.return_value = self.saved(docket="23-3216", comments="")
+        self.assertIn("unavailable in mapping", self.router.verify_ready_locked_form(self.df.loc[1], self.df))
+
+    def test_separated_date_must_be_a_valid_calendar_date(self):
+        self.assertEqual(self.router.extract_decision_date_from_filename("smd_23-3217_CADC_11_12_2026_0_151965905.pdf"), "11-12-2026")
+        self.assertIsNone(self.router.extract_decision_date_from_filename("smd_23-3217_CADC_02_30_2026_0_151965905.pdf"))
 
     def test_specialist_metadata_uses_its_own_fields_without_counsel_requirements(self):
         metadata = SimpleNamespace(docket_number="2026-392", decision_date="10-21-2026", source_detail="Opinion")

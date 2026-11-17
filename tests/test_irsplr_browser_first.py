@@ -96,6 +96,28 @@ class BrowserProofTests(unittest.TestCase):
             self.driver.execute_cdp_cmd.return_value = {"nodes": [{"role": {"value": "PdfRoot"}, **node}]}
             self.assertEqual(browser_pdf_state(self.driver, self.error), "loading")
 
+    def test_closed_browser_shadow_frame_is_checked_and_restored(self):
+        body, frame = Mock(), Mock()
+        self.driver.find_elements.return_value = [body]
+        body.shadow_root.find_elements.return_value = [frame]
+        for state in ("loaded", "password", "failed", "loading"):
+            with self.subTest(state=state), patch(
+                "core.irsplr_browser_check._browser_pdf_state",
+                side_effect=["loading", state],
+            ):
+                self.assertEqual(browser_pdf_state(self.driver, self.error), state)
+                self.driver.switch_to.frame.assert_called_with(frame)
+                self.driver.switch_to.parent_frame.assert_called()
+
+    def test_viewer_exception_restores_parent_and_remains_unconfirmed(self):
+        body = Mock()
+        self.driver.find_elements.return_value = [body]
+        body.shadow_root.find_elements.return_value = [Mock()]
+        with patch("core.irsplr_browser_check._browser_pdf_state",
+                   side_effect=["loading", RuntimeError("frame navigating")]):
+            self.assertEqual(browser_pdf_state(self.driver, self.error), "loading")
+        self.driver.switch_to.parent_frame.assert_called_once()
+
 
 class IRSPLRBrowserIntegrationTests(unittest.TestCase):
     def setUp(self):

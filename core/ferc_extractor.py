@@ -27,6 +27,7 @@ _PROJECT_NUMBER_RE = re.compile(
     re.I,
 )
 _BARE_PROJECT_NUMBER_RE = re.compile(r"\b\d{1,6}-\d{1,4}\b")
+_LETTER_SALUTATION_RE = re.compile(r"^Dear\s+[^\n:]+[:,]\s*$", re.I)
 
 
 @dataclass(frozen=True)
@@ -154,7 +155,7 @@ def parse_ferc_document_text(text: str, filename_hint: Optional[str] = None) -> 
     docket_numbers = extract_ferc_docket_numbers(header)
     docket = docket_numbers[0] if docket_numbers else ""
     other_numbers = tuple(docket_numbers[1:])
-    decision_date = extract_ferc_issued_date(header)
+    decision_date = extract_ferc_issued_date(header, letter=title_label.startswith("DEAR "))
 
     if re.search(r"\bERRAT(?:A|UM)\b", title_label):
         review_status = "ERRATA FOR REVIEW"
@@ -186,14 +187,20 @@ def parse_ferc_document_text(text: str, filename_hint: Optional[str] = None) -> 
 
 def find_ferc_title(lines: list[str]) -> str:
     """Return the operative all-caps first-page heading, never body prose."""
-    for line in lines:
+    salutation = next((i for i, line in enumerate(lines[:35]) if _LETTER_SALUTATION_RE.fullmatch(line)), None)
+    # Correspondence has no operative heading. Ignore headings/order references
+    # in its body, while preserving formal headings ahead of a salutation.
+    header_lines = lines[:salutation] if salutation is not None else lines
+    for line in header_lines:
         label = _label(line)
         if re.search(r"\bERRAT(?:A|UM)\b", label):
             return line
-    for line in lines:
+    for line in header_lines:
         label = _label(line)
         if _is_ferc_all_caps(line) and re.match(r"^(?:CERTIFICATION|OPINION|MEMORANDUM|ORDER)\b", label):
             return line
+    if salutation is not None:
+        return lines[salutation]
     # FERC also publishes operative headings such as "NOTICE OF DENIAL ...".
     # Treat a title-shaped all-caps header as the title before looking for an
     # incidental "order" in the body.  The exclusions avoid mistaking the
@@ -208,6 +215,8 @@ def find_ferc_title(lines: list[str]) -> str:
 
 
 def classify_ferc_source_detail(title: str) -> str:
+    if re.match(r"^DEAR\s+", title):
+        return "Letter"
     # A title headed OPINION, CERTIFICATION, or MEMORANDUM remains OP even if
     # a later phrase includes "ORDER" (for example, Opinion No. 595).
     if re.match(r"^(?:CERTIFICATION|OPINION|MEMORANDUM)\b", title):
@@ -237,7 +246,25 @@ def extract_ferc_docket_numbers(header: str) -> list[str]:
     return found
 
 
-def extract_ferc_issued_date(header: str) -> Optional[str]:
+def extract_ferc_issued_date(header: str, letter: bool = False) -> Optional[str]:
+    if letter:
+        # Choose the standalone date closest to the top citation/masthead,
+        # never a historical date embedded in the correspondence body.
+        anchor = _FERC_CITATION_RE.search(header) or re.search(
+            r"FEDERAL ENERGY REGULATORY COMMISSION", header, re.I
+        )
+        dates = list(re.finditer(
+            r"(?m)^[ \t]*\(?[ \t]*(?:Issued(?: on)?(?:[ \t]*:[ \t]*|[ \t]+))?([A-Za-z]+[ \t]+\d{1,2},[ \t]*\d{4})[ \t]*\)?[ \t]*$",
+            header, re.I,
+        ))
+        anchor_line = header[:anchor.start()].count("\n") if anchor else 0
+        dates.sort(key=lambda match: abs(header[:match.start()].count("\n") - anchor_line))
+        for match in dates:
+            try:
+                return _datetime.datetime.strptime(re.sub(r"\s+", " ", match.group(1)), "%B %d, %Y").strftime("%m-%d-%Y")
+            except ValueError:
+                continue
+        return None
     patterns = (
         r"\(\s*([A-Za-z]+\s+\d{1,2},\s*\d{4})\s*\)",
         r"\(\s*Issued(?:\s+on)?\s+([A-Za-z]+\s+\d{1,2},\s*\d{4})\s*\)",
@@ -283,6 +310,12 @@ def _is_ferc_all_caps(value: str) -> bool:
 
 def _metadata_header(lines: list[str]) -> str:
     """Keep extraction inside the visual header, ending at its date line."""
+    # A letter's date precedes its docket. Keep both, stopping at the
+    # salutation so body citations, dates and dockets cannot leak in.
+    if find_ferc_title(lines[:70]).lower().startswith("dear "):
+        for index, line in enumerate(lines[:35]):
+            if _LETTER_SALUTATION_RE.fullmatch(line):
+                return "\n".join(lines[:index])
     date_line = re.compile(
         r"^\(\s*(?:Issued(?:\s+on)?\s+)?[A-Za-z]+\s+\d{1,2},\s*\d{4}\s*\)$",
         re.I,

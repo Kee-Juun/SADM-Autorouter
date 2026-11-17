@@ -31,8 +31,8 @@ class ManualReviewReportingTests(unittest.TestCase):
             run_status_summary=review_summary,
         )
 
-        self.assertIn("Manual review required:", body)
-        self.assertIn("Documents skipped safely: 1", body)
+        self.assertIn("Manual Review Required:", body)
+        self.assertIn("Documents Skipped Safely: 1", body)
         self.assertIn("LDC_SMD_P-2576-219_E2E.pdf", body)
         self.assertIn("6KRV-X203-S9X6-C2W3-00000-00", body)
 

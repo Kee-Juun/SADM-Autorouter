@@ -3682,6 +3682,7 @@ class CaseLawRouter:
         self._active_duplicate_lni = str(row.get("LNI", "")).strip().upper()
         self._verified_duplicate_match = None
         self._active_duplicate_row = row
+        self._counsel_save_expected = None
         self._active_irsplr_corrupt_exclusion = bool(getattr(irsplr_metadata, "is_verified_corrupt", False))
         self._irsplr_duplicate_review_reason = ""
         self._itc_duplicate_review_reason = ""
@@ -3816,6 +3817,10 @@ class CaseLawRouter:
                 status_updates_buffer[row_index] = status
             if status == "DONE" and self._verified_duplicate_match:
                 status = self.duplicate_status_label()
+            if status == "DONE" and is_counsel(row.get("FileName", ""), dar_mode, wc_mode):
+                status = self.verify_counsel_save(row, row_index, opened_tab, main_tab)
+                status_updates_buffer[row_index] = status
+                return status
             if status == "DONE" or str(status).upper().startswith("DUPLICATE OF "):
                 self.submit_irt_form(file_path, row_index)
                 status_updates_buffer[row_index] = status
@@ -5028,6 +5033,8 @@ class CaseLawRouter:
     def verify_ready_locked_form(self, row, full_df, *, dar_mode=False, wc_mode=False, metadata=None):
         """Verify a Ready-locked record against this run's intended fields/links."""
         issues = []
+        docket_issue = None
+        consolidated_main = False
         try:
             saved = self.read_ready_locked_form()
             if not isinstance(saved, dict):
@@ -5045,6 +5052,7 @@ class CaseLawRouter:
                 if counsel:
                     expected_date = self.find_main_opinion_date_for_counsel(
                         expected_docket, name, dar_mode, wc_mode, full_df=full_df,
+                        counsel_lni=row.get("LNI"),
                     )
                 expected_date = expected_date or self.normalize_mapping_decision_date(row.get("Decision Date")) or self.extract_decision_date_from_filename(name)
             expected_source = getattr(metadata, "source_detail", None) if metadata is not None else resolve_source_detail(row.get("SourceDetail", row.get("Source Detail", "")))
@@ -5058,7 +5066,7 @@ class CaseLawRouter:
                 if not expected_docket:
                     issues.append("expected docket number unavailable")
                 elif docket_key(saved.get("docket")) != docket_key(expected_docket):
-                    issues.append(f"Docket expected {expected_docket}, found {saved.get('docket') or 'blank/unavailable'}")
+                    docket_issue = f"Docket expected {expected_docket}, found {saved.get('docket') or 'blank/unavailable'}"
                 if not self._saved_date_key(expected_date):
                     issues.append("expected decision date unavailable")
                 elif self._saved_date_key(saved.get("decision_date")) != self._saved_date_key(expected_date):
@@ -5086,9 +5094,38 @@ class CaseLawRouter:
                     expected_lnis = {lni.upper() for lni in expected_lnis}
                     actual_lnis = set(re.findall(lni_pattern, str(saved.get("related_lnis") or "").upper()))
                     label = "related counsel LNI"
+                    recycled_lnis = {
+                        lni.strip().upper() for lni in str(row.get("RecycledCounselLNI", "") or "").split(";")
+                        if lni.strip() and lni.strip().upper() != "NAN"
+                    }
+                    primary_lnis = {
+                        lni.upper() for lni in get_related_counsel_lnis(
+                            expected_docket, full_df, dar_mode=dar_mode, wc_mode=wc_mode,
+                        )
+                    }
+                    # A consolidated main may retain another docket from the
+                    # consolidated case. Require explicit additional counsel
+                    # in the mapping and every required link in saved IRT.
+                    # External recycled counsel need not have a row here.
+                    consolidated_main = (
+                        bool(recycled_lnis - primary_lnis)
+                        and all(re.fullmatch(lni_pattern, lni) for lni in recycled_lnis)
+                        and bool(expected_lnis) and expected_lnis <= actual_lnis
+                    )
                 expected_lnis.discard("")
                 expected_lnis.discard("NAN")
-                if not expected_lnis:
+                consolidated_parent = counsel and any(
+                    not is_counsel(candidate.get("FileName", ""), dar_mode, wc_mode)
+                    and str(row.get("LNI", "")).strip().upper() in {
+                        value.strip().upper() for value in str(candidate.get("RecycledCounselLNI", "") or "").split(";")
+                        if value.strip()
+                    }
+                    for _, candidate in full_df.iterrows()
+                )
+                # Consolidated counsel can have a different docket, with no
+                # same-docket main LNI written to Comments by the original run.
+                # The parent's saved Related list is verified on its own row.
+                if not expected_lnis and not consolidated_parent:
                     issues.append(f"expected {label} unavailable in mapping")
                 elif expected_lnis - actual_lnis:
                     issues.append(f"missing {label}: {', '.join(sorted(expected_lnis - actual_lnis))}")
@@ -5104,6 +5141,17 @@ class CaseLawRouter:
                     compact = lambda value: re.sub(r"\s+", " ", self.normalize_irt_text(value)).strip().casefold()
                     if compact(expected_comment) not in compact(comments):
                         issues.append("required Comments text missing")
+            if docket_issue:
+                saved_docket = docket_key(saved.get("docket"))
+                if (consolidated_main and not issues
+                        and saved_docket not in {"", "INITIALIZED", "N/A", "NAN", "NONE", "UNDEFINED"}):
+                    logging.info(
+                        "LNI %s: consolidated main retains saved IRT docket %s (filename docket %s); "
+                        "all required counsel links and saved routing details match.",
+                        row.get("LNI", ""), saved.get("docket"), expected_docket,
+                    )
+                else:
+                    issues.append(docket_issue)
         except Exception as exc:
             self._raise_if_invalid_session_error(exc, "verifying Ready-locked IRT form")
             logging.warning("Could not verify Ready-locked record: %s", exc)
@@ -7114,6 +7162,43 @@ class CaseLawRouter:
 
         return handled_alert, duplicate_seen
 
+    def verify_counsel_save(self, row, row_index, opened_tab, main_tab):
+        """Confirm persistence in a fresh view, without Modify or another Save."""
+        status = "NEEDS RERUN - COUNSEL SAVE UNCONFIRMED"
+        verification_tab = None
+        try:
+            expected = getattr(self, "_counsel_save_expected", None)
+            if not isinstance(expected, dict):
+                raise ValueError("expected counsel routing values were not captured")
+            self._cleanup_tabs(opened_tab, main_tab)
+            if not self.handle_lni_search(str(row.get("LNI", "")).strip()):
+                raise ValueError("could not reopen counsel from Inventory")
+            verification_tab = self.driver.current_window_handle
+            if verification_tab == main_tab:
+                raise ValueError("counsel form did not open")
+
+            def persisted(_driver):
+                saved = self.read_ready_locked_form()
+                if not isinstance(saved, dict) or saved.get("ready") is not True or saved.get("blocking_dialog"):
+                    return False
+                if not self.dropdown_text_matches(saved.get("route"), "Archive"):
+                    return False
+                for key in ("docket", "source_detail", "comments"):
+                    if self.normalize_irt_text(saved.get(key)) != self.normalize_irt_text(expected.get(key)):
+                        return False
+                return self._saved_date_key(saved.get("decision_date")) == self._saved_date_key(expected.get("decision_date"))
+
+            WebDriverWait(self.driver, 20).until(persisted)
+            logging.info("Counsel LNI %s saved Archive/Ready state and fields confirmed after reopening.", row.get("LNI"))
+            status = "DONE"
+        except Exception as exc:
+            self._raise_if_invalid_session_error(exc, "verifying saved counsel")
+            logging.warning("Counsel LNI %s Save not confirmed; dependent main opinions must wait: %s", row.get("LNI"), exc)
+        finally:
+            status_updates_buffer[row_index] = status
+            self._cleanup_tabs(verification_tab, main_tab)
+        return status
+
     def handle_routing_and_save(self, is_counsel, row_index, skip_route_and_ready=False):
         if getattr(self, "_itc_duplicate_review_reason", ""):
             status_updates_buffer[row_index] = "MANUAL REVIEW REQUIRED - ITC " + self._itc_duplicate_review_reason
@@ -7168,16 +7253,24 @@ class CaseLawRouter:
                     self.handle_any_alert(timeout=2)
                     ready_result = self.click_ready_checkbox_and_check_overlay(is_counsel)
                     if ready_result == "READY_NOT_CLICKABLE":
-                        logging.info("Ready to Process checkbox was not clickable during routing; marking document as ALREADY PROCESSED.")
+                        logging.warning("Ready to Process was not clickable; completion is unconfirmed.")
                         if row_index is not None:
-                            status_updates_buffer[row_index] = "ALREADY PROCESSED"
-                        self.driver.close()
-                        self.driver.switch_to.window(self.driver.window_handles[0])
-                        return "ALREADY PROCESSED"
+                            status_updates_buffer[row_index] = "NON-INTERACTABLE IRT FORM"
+                        return "NON-INTERACTABLE IRT FORM"
                     self.handle_any_alert(timeout=2)
                 # Try to save
                 try:
-                    self.click_element('//*[@id="add"]')
+                    if is_counsel:
+                        expected = self.read_ready_locked_form()
+                        if (not isinstance(expected, dict) or expected.get("ready") is not True
+                                or not self.dropdown_text_matches(expected.get("route"), "Archive")
+                                or not str(expected.get("docket") or "").strip()
+                                or str(expected.get("docket")).strip().upper() == "INITIALIZED"
+                                or not self._saved_date_key(expected.get("decision_date"))):
+                            raise ValueError("counsel Archive/Ready/docket/date values not confirmed before Save")
+                        self._counsel_save_expected = expected
+                    if not self.click_element('//*[@id="add"]'):
+                        raise RuntimeError("Save button click failed")
                     logging.info("Clicked Save button.")
                     # Check for alert after save
                     try:
@@ -7198,14 +7291,16 @@ class CaseLawRouter:
                                 if row_index is not None:
                                     status_updates_buffer[row_index] = "INVALID ROUTING COMBO"
                                 return "INVALID ROUTING COMBO"
+                        if re.search(r"\b(cannot|failed|invalid|error|required)\b|\bnot\s+(saved|valid|processed)\b", alert_text, re.I):
+                            status_updates_buffer[row_index] = "ERROR: SAVE REJECTED"
+                            return "ERROR: SAVE REJECTED"
                     except TimeoutException:
                         pass  # No alert after save
                     return "DONE"
                 except Exception as e:
-                    logging.info("Save failed, assuming form already processed. Closing window.")
-                    self.driver.close()
-                    self.driver.switch_to.window(self.driver.window_handles[0])
-                    return "ALREADY PROCESSED"
+                    logging.warning("Save failed; completion cannot be assumed: %s", e)
+                    status_updates_buffer[row_index] = "NEEDS RERUN - SAVE UNCONFIRMED"
+                    return "NEEDS RERUN - SAVE UNCONFIRMED"
             except Exception as e:
                 if self.handle_unexpected_alert():
                     logging.info("Continuing after handling an unexpected alert during routing.")
@@ -8530,7 +8625,7 @@ class CaseLawRouter:
             return datetime.datetime.strptime(date_key, "%Y-%m-%d").strftime("%m-%d-%Y")
         return text
 
-    def find_main_opinion_date_for_counsel(self, counsel_docket, counsel_file_name, dar_mode=False, wc_mode=False, full_df=None):
+    def find_main_opinion_date_for_counsel(self, counsel_docket, counsel_file_name, dar_mode=False, wc_mode=False, full_df=None, *, counsel_lni=None):
         """Find the matched main opinion's mapping/filename date for a counsel document."""
         try:
             dataframe = full_df if full_df is not None else getattr(self, "full_df", None)
@@ -8539,7 +8634,10 @@ class CaseLawRouter:
                     main_file_name = str(row.get("FileName", "")).strip()
                     if not is_counsel(main_file_name, dar_mode, wc_mode):
                         main_docket = CaseLawRouter.format_docket_number(None, main_file_name, dar_mode, wc_mode)
-                        if main_docket and main_docket == counsel_docket:
+                        recycled = {value.strip().upper() for value in str(row.get("RecycledCounselLNI", "") or "").split(";")}
+                        if main_docket and (main_docket == counsel_docket or (
+                            counsel_lni and str(counsel_lni).strip().upper() in recycled
+                        )):
                             mapped_date = self.normalize_mapping_decision_date(row.get("Decision Date"))
                             if mapped_date:
                                 logging.info(
@@ -8653,7 +8751,7 @@ class CaseLawRouter:
         main_docket = CaseLawRouter.format_docket_number(None, row["FileName"], dar_mode, wc_mode)
         related_attached = self.handle_related_ln_is(row, full_df, row_index=row_index, file_path=file_path, dar_mode=dar_mode, wc_mode=wc_mode)
         if not related_attached:
-            logging.error(f"Skipping main opinion for docket {main_docket} because no related LNI could be attached.")
+            logging.error(f"Skipping main opinion for docket {main_docket} because one or more required related LNIs were not confirmed.")
             current_status = status_updates_buffer.get(row_index) if row_index is not None else None
             if not current_status:
                 current_status = "Missing Counsel Information"
@@ -8774,6 +8872,22 @@ class CaseLawRouter:
                         success = True
                         break
                     except Exception as e:
+                        if "cannot be added as related lni" in str(e).lower():
+                            # IRT rejected the prerequisite, rather than a
+                            # missed click. Recheck that counsel on the next
+                            # run even if an older run labelled it Done.
+                            try:
+                                self.driver.switch_to.alert.accept()
+                            except NoAlertPresentException:
+                                pass
+                            for counsel_index, counsel_row in full_df.iterrows():
+                                if (str(counsel_row.get("LNI", "")).strip().upper() == str(lni).upper()
+                                        and is_counsel(counsel_row.get("FileName", ""), dar_mode, wc_mode)):
+                                    status_updates_buffer[counsel_index] = "NEEDS RERUN - COUNSEL SAVE UNCONFIRMED"
+                            if row_index is not None:
+                                status_updates_buffer[row_index] = "NEEDS RERUN - COUNSEL FAILED"
+                            logging.warning("IRT rejected related counsel %s; its saved state must be rechecked before this main opinion can proceed.", lni)
+                            return False
                         if "already exists" in str(e).lower():
                             logging.warning(f"Related Counsel LNI {lni} already attached. Skipping.")
                             logging.info(f"{lni} already exists according to alert. Skipping further attempts.")
@@ -8857,6 +8971,12 @@ class CaseLawRouter:
             str: Date in MM-DD-YYYY format if found, None otherwise
         """
         try:
+            # SMD filenames use separated dates: ..._11_12_2026_0_....pdf.
+            # Validate with datetime so impossible dates cannot verify a row.
+            separated = re.search(r'(?:^|[_-])(\d{1,2})[_-](\d{1,2})[_-]((?:19|20)\d{2})(?=[_.-]|$)', str(file_name))
+            if separated:
+                month, day, year = map(int, separated.groups())
+                return datetime.date(year, month, day).strftime("%m-%d-%Y")
             # Look for 8-digit date pattern in filename
             match = re.search(r'[_-](\d{8})(?=[_-]|\.|$)|^(\d{8})[_-]|[_-](\d{8})$', str(file_name))
             if match:

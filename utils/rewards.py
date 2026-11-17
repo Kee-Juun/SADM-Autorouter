@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from utils.inventory_order import normalized_history, record_acquisition, record_usage
 
 
 # Public, version-resilient storage location.
@@ -696,15 +697,7 @@ REWARDS = {
         "unlock_message": "Tetris break privilege unlocked. It is now claimable in the Shop.",
         "description": "A free break-time game earned at 100 XP. Still somehow stressful. Still somehow worth it.",
     },
-    "game_archivebound": {
-        "type": "game",
-        "name": "Out of Spec: The Archivist Trials",
-        "price": 0,
-        "required_xp": 2500,
-        "image": "../rpg/archivebound_icon.png",
-        "unlock_message": "Out of Spec unlocked. The first Archivist Trial is now claimable in the Shop.",
-        "description": "A dark-fantasy pixel RPG about restoring forbidden records.",
-    },
+
 }
 
 
@@ -1289,11 +1282,13 @@ def set_custom_wallpaper_data(user_data, source_path, processed_path, zoom=1.0, 
     unlocked = _unique_list(data.get("unlocked", []))
     if CUSTOM_WALLPAPER_ID not in unlocked:
         unlocked.append(CUSTOM_WALLPAPER_ID)
+        record_acquisition(data, CUSTOM_WALLPAPER_ID)
     data["unlocked"] = unlocked
     equipped = dict(DEFAULT_EQUIPPED)
     equipped.update(data.get("equipped", {}) or {})
     equipped["header"] = CUSTOM_WALLPAPER_ID
     data["equipped"] = equipped
+    record_usage(data, CUSTOM_WALLPAPER_ID)
     saved = save_user_rewards(data)
     logging.info(
         "Custom wallpaper saved and equipped. equipped_header=%s processed_exists=%s",
@@ -1546,6 +1541,8 @@ def normalize_user_rewards(data):
             continue
         filtered_unlocked.append(reward_id)
     data["unlocked"] = _unique_list(filtered_unlocked)
+    data["item_history"] = {key: value for key, value in normalized_history(data.get("item_history")).items()
+                            if key in data["unlocked"]}
 
     if legacy_title_equipped and legacy_title_equipped in data["unlocked"] and not equipped.get("badge"):
         equipped["badge"] = legacy_title_equipped
@@ -1803,6 +1800,7 @@ def _unlock_achievements(user_data, current_run):
         badge_reward = achievement.get("badge_reward")
         if badge_reward and badge_reward in REWARDS:
             unlocked_rewards.add(badge_reward)
+            record_acquisition(user_data, badge_reward)
         achievement_reward_grants.add(achievement_id)
         new_achievements.append({
             "id": achievement_id,

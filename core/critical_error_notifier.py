@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import datetime
+from html import escape
 import json
 import logging
 import os
 import random
+import re
 import shutil
 import socket
 import threading
@@ -16,6 +18,7 @@ from typing import Any
 from .smducar_config import error_log_entries, load_config, status_updates_buffer
 from .rerun_status import RERUN_STATUS_PREFIX, summarize_statuses_for_rows
 from .build_info import build_version_footer, get_build_info
+from .smducar_user import clean_display_name, get_full_username
 
 
 DEFAULT_DEVELOPER_EMAIL = "kevinjohn.libuna@reedelsevier.com"
@@ -31,6 +34,9 @@ CRITICAL_STATUS_MARKERS = (
 _run_lock = threading.Lock()
 _active_run: dict[str, Any] = {}
 _email_random = random.SystemRandom()
+_attachment_copy_lock = threading.Lock()
+_attachment_copy_remaining: list[str] = []
+_last_attachment_copy = ""
 
 
 def start_critical_error_run(latest_excel=None, mode=None, config=None):
@@ -501,195 +507,57 @@ def _legacy_critical_email_theme():
     ))
 
 
-SUCCESS_SUBJECTS = (
-    "The queue is clear",
-    "Run complete and neatly documented",
-    "Clean run with the receipts attached",
-    "Everything routed cleanly",
-    "The paper trail is ready",
-    "Run wrapped with notes in place",
-    "Queue cleared without a fuss",
-    "Routing finished and records are ready",
-    "Clean finish from the routing desk",
-    "Batch handled with receipts",
-    "The run landed cleanly",
-    "Documents routed and notes packed",
-    "This one closed cleanly",
-    "Run complete with a tidy trail",
-    "The queue behaved today",
-    "Routing done, records in hand",
-    "Finished cleanly with the details attached",
-    "Another batch safely wrapped",
-    "The records are ready for review",
-    "Clean run, tidy notes",
-    "The batch is closed",
-    "Run finished with everything attached",
-    "Queue cleared and documented",
-    "A clean little routing win",
-    "The run is done and traceable",
-    "Routing complete with no loose ends",
-    "The paperwork made it home",
-    "Files routed, trail secured",
-    "Run closed with receipts ready",
-    "All clear from the routing desk",
-)
-
-
-CRITICAL_SUBJECTS = (
-    "Run needs a quick review",
-    "A few rows need another pass",
-    "The bot paused with clues attached",
-    "Routing stopped with a report ready",
-    "This run needs attention",
-    "Issue caught and documented",
-    "The report is ready for review",
-    "Run interrupted with notes attached",
-    "A routing snag needs a look",
-    "The queue hit a checkpoint",
-    "Not finished yet, but documented",
-    "Some rows need rerun",
-    "The run paused before guessing",
-    "Critical stop with clues ready",
-    "Chrome may need a fresh start",
-    "Search Inventory needs another pass",
-    "The Modify button went missing",
-    "PDF text needs a closer look",
-    "Related counsel needs attention",
-    "Router session needs review",
-    "The batch needs a careful rerun",
-    "Issue logged with context",
-    "Something stopped the run cleanly",
-    "The trail is ready for debugging",
-    "A rerun path is ready",
-    "Review needed with receipts attached",
-    "The bot stopped and brought notes",
-    "The queue needs a second look",
-    "Run paused with the evidence intact",
-    "Critical report ready",
-)
-
-
-SUCCESS_GREETINGS = (
-    "Good news,",
-    "Quick update,",
-    "Hello from the routing desk,",
-    "Friendly run update,",
-    "Hi there,",
-    "Run update,",
-    "A tidy little update,",
-    "Good news from the queue,",
-)
-
-
+SUCCESS_SUBJECTS = ("Run Complete", "Routing Results")
+CRITICAL_SUBJECTS = ("Action Needed", "Run Needs Attention")
+SUCCESS_GREETINGS = ("Hi team,",)
 SUCCESS_OPENERS = (
-    "{app_name} finished the run and kept the paper trail tidy. We love a clean exit.",
-    "{app_name} made it through the batch cleanly, with the useful details packed and ready.",
-    "{app_name} closed this run without drama and brought the notes along like a professional.",
-    "{app_name} handled the queue and left behind enough context for future-you to breathe.",
-    "{app_name} finished routing and did the polite thing: documented everything.",
-    "{app_name} wrapped the work cleanly. The queue is handled, and the receipts did not wander off.",
-    "{app_name} completed the run with the numbers below and the supporting files attached.",
-    "{app_name} got through the batch and kept the documentation close. Sensible behavior. We approve.",
-    "{app_name} finished the run and left a tidy trail behind. Very considerate of the next person.",
-    "{app_name} handled this one cleanly. Nothing mystical, just useful automation with notes.",
+    "{app_name} has finished this run. Here are the results.",
+    "The {app_name} run is complete. Your results are below.",
+    "Your {app_name} results are ready to review.",
 )
-
-
-SUCCESS_SCOREBOARDS = (
-    "Quick run snapshot:",
-    "The useful numbers:",
-    "Run scorecard:",
-    "For the record:",
-    "Here is the clean little breakdown:",
-    "Routing snapshot:",
+SUCCESS_SCOREBOARDS = ("Run Results:",)
+REPORT_ATTACHMENT_LINES = (
+    "The run log and mapping sheet are attached.",
+    "Attached: the run log and mapping sheet.",
+    "The log and mapping sheet for this run are attached.",
+    "Your run log and mapping sheet are attached for reference.",
+    "The run log and mapping sheet are included with this report.",
+    "You will find the run log and mapping sheet attached.",
+    "For the details, see the attached run log and mapping sheet.",
+    "Full details are in the attached run log and mapping sheet.",
 )
-
-
-SUCCESS_ATTACHMENT_LINES = (
-    "I attached the current run log and completed mapping sheet so the useful receipts are easy to find.",
-    "The current run log and completed mapping sheet are attached for a quick, tidy review.",
-    "Two useful files are attached: the run log and completed mapping sheet. Receipts, but organized.",
-    "I included the current run log and completed mapping sheet so nobody has to go folder-hunting later.",
-    "The run log and completed mapping sheet are attached, because a clean run deserves a clean paper trail.",
-    "Current run log and completed mapping sheet: attached and ready for future-you.",
-)
-
-
-SUCCESS_CLOSERS = (
-    "Clean finish. Receipts included.",
-    "A small routing win, neatly documented.",
-    "Done, traceable, and ready for the archive shelf.",
-    "That is the run, wrapped and behaving.",
-    "Clean queue, clean notes, calm ending.",
-    "Nicely handled. The paperwork made it home.",
-    "A tidy finish from your routing desk.",
-    "Closed cleanly, with no loose ends left wandering.",
-)
-
-
-CRITICAL_GREETINGS = (
-    "Quick heads-up,",
-    "Routing alert,",
-    "Hi there,",
-    "Careful pause from the routing desk,",
-    "Heads up,",
-    "Quick review needed,",
-    "Friendly alert,",
-    "The bot has a note,",
-)
-
-
+SUCCESS_CLOSERS = ("Thanks,",)
+CRITICAL_GREETINGS = ("Hi team,",)
 CRITICAL_OPENERS = (
-    "{app_name} hit a real stopping point and paused before making the situation messier. Sensible, if slightly dramatic.",
-    "{app_name} ran into something it could not safely push through, so it stopped and gathered the details.",
-    "{app_name} paused on a critical issue. Not ideal, but the clues are organized and ready.",
-    "{app_name} found a snag worth documenting. The run did not finish cleanly, but the trail is intact.",
-    "{app_name} stopped at the right moment instead of guessing. Annoying, yes. Useful for debugging, also yes.",
-    "{app_name} ran into a blocker and packed the evidence before the trail could get fuzzy.",
-    "{app_name} could not complete the run cleanly, so it saved the context for a faster review.",
-    "{app_name} needs a look. The good news: the report arrived with the clues already grouped.",
+    "{app_name} stopped because an issue needs attention. Details and next steps are below.",
+    "{app_name} encountered an issue during this run. Here is what needs review.",
+    "This {app_name} run needs attention. See the details and suggested next steps below.",
 )
+CRITICAL_SNAPSHOTS = ("What Needs Attention:",)
+CRITICAL_CLOSERS = ("Thanks,",)
 
 
-CRITICAL_SNAPSHOTS = (
-    "What happened:",
-    "Issue snapshot:",
-    "The useful details:",
-    "What needs review:",
-    "The short version:",
-    "Captured context:",
-)
-
-
-CRITICAL_ATTACHMENT_LINES = (
-    "I attached the current run log and completed mapping sheet so review can start from the actual clues.",
-    "The current run log and completed mapping sheet are attached. No detective work from scratch required.",
-    "The two useful files are attached: the run log for context and the completed mapping sheet for the rerun plan.",
-    "I included the current run log and completed mapping sheet so the next pass can stay targeted.",
-    "The practical debugging pair is attached: current run log and completed mapping sheet.",
-    "The log and completed mapping sheet are attached. Very organized behavior for an interrupted run.",
-)
-
-
-CRITICAL_CLOSERS = (
-    "Not the ending we wanted, but the trail is tidy.",
-    "A little annoying, very documented.",
-    "The run needs attention, but at least the clues showed up organized.",
-    "This one needs review. The paper trail is ready.",
-    "The issue is logged, and the rerun path is clearer now.",
-    "Not a clean finish, but not a mystery either.",
-    "The bot paused, brought notes, and left the next step visible.",
-    "Recoverable energy. With attachments.",
-)
+def _attachment_line():
+    """Vary the copy without repeating a line until the current set is used."""
+    global _last_attachment_copy
+    with _attachment_copy_lock:
+        if not _attachment_copy_remaining:
+            _attachment_copy_remaining.extend(REPORT_ATTACHMENT_LINES)
+            _email_random.shuffle(_attachment_copy_remaining)
+            if len(_attachment_copy_remaining) > 1 and _attachment_copy_remaining[-1] == _last_attachment_copy:
+                _attachment_copy_remaining[0], _attachment_copy_remaining[-1] = (
+                    _attachment_copy_remaining[-1], _attachment_copy_remaining[0])
+        _last_attachment_copy = _attachment_copy_remaining.pop()
+        return _last_attachment_copy
 
 
 def _success_email_theme():
     return {
         "subject": _pick(SUCCESS_SUBJECTS),
-        "hello": _pick(SUCCESS_GREETINGS),
+        "hello": _email_greeting(),
         "opener": _pick(SUCCESS_OPENERS),
         "scoreboard": _pick(SUCCESS_SCOREBOARDS),
-        "attachments": _pick(SUCCESS_ATTACHMENT_LINES),
+        "attachments": _attachment_line(),
         "closer": _pick(SUCCESS_CLOSERS),
     }
 
@@ -697,10 +565,10 @@ def _success_email_theme():
 def _critical_email_theme():
     return {
         "subject": _pick(CRITICAL_SUBJECTS),
-        "hello": _pick(CRITICAL_GREETINGS),
+        "hello": _email_greeting(),
         "opener": _pick(CRITICAL_OPENERS),
         "snapshot": _pick(CRITICAL_SNAPSHOTS),
-        "attachments": _pick(CRITICAL_ATTACHMENT_LINES),
+        "attachments": _attachment_line(),
         "closer": _pick(CRITICAL_CLOSERS),
     }
 
@@ -734,6 +602,8 @@ def _critical_subject(subject_mode, timestamp, theme=None):
 
 
 def _format_count_line(label, value):
+    # Title Case display labels while keeping acronyms such as LNI and DONE.
+    label = re.sub(r"[A-Za-z]+", lambda match: match[0] if match[0].isupper() else match[0].capitalize(), label)
     return f"- {label}: {value}"
 
 
@@ -761,7 +631,7 @@ def _format_run_status_examples(summary, max_rows=12):
     if not rows:
         return []
 
-    lines = ["Rows to rerun preview:"]
+    lines = ["Rows to Rerun Preview:"]
     for row in rows[:max_rows]:
         excel_row = row.get("Excel Row") or row.get("Row") or "N/A"
         lni = row.get("LNI", "N/A")
@@ -778,7 +648,7 @@ def _format_manual_review_examples(summary, max_rows=12):
     if not rows:
         return []
 
-    lines = ["Manual-review documents:"]
+    lines = ["Manual-Review Documents:"]
     for row in rows[:max_rows]:
         lni = row.get("LNI") or "N/A"
         filename = row.get("File Name") or "Unknown file"
@@ -845,7 +715,7 @@ def _critical_troubleshooting_steps(payload, run_status_summary):
 
     playbooks = {
         "user_reset": (
-            "If the reset was intentional, this is mostly a cleanup report, not instant panic.",
+            "If you reset the run intentionally, use this report to check what remains.",
             "Open the attached mapping sheet and filter the Status column for NEEDS RERUN.",
             "Rerun the same sheet and leave DONE or ALREADY PROCESSED rows unchanged; the bot will skip them.",
             "If the reset happened because the bot looked frozen, send this report with the log so the pause point can be reviewed.",
@@ -854,7 +724,7 @@ def _critical_troubleshooting_steps(payload, run_status_summary):
             "Close any leftover Chrome windows that were opened by the bot.",
             "Relaunch the bot, then rerun the attached mapping sheet.",
             "Keep DONE and ALREADY PROCESSED rows as-is; focus on NEEDS RERUN rows.",
-            "If it happens again, try fewer parallel routers first. Chrome may simply be asking for a smaller circus.",
+            "If it happens again, try fewer parallel routers and send the log for review.",
         ),
         "search_inventory": (
             "Confirm the IRT site opens normally in Chrome.",
@@ -866,17 +736,17 @@ def _critical_troubleshooting_steps(payload, run_status_summary):
             "Rerun the attached mapping sheet and focus on rows marked NEEDS RERUN.",
             "If the same LNI fails again, manually open that IRT form and check whether it is locked, already processed, or loading unusually slowly.",
             "Leave DONE and ALREADY PROCESSED rows alone so the rerun stays targeted.",
-            "Send this report if the Modify button keeps disappearing. That page may be stale, locked, or being dramatic in a very specific way.",
+            "If Modify is still unavailable, send this report so the form state can be checked.",
         ),
         "pdf_unreadable": (
-            "Open the downloaded PDF from the report or download folder and confirm it has readable text.",
+            "Open the downloaded PDF and confirm it has readable text.",
             "If it is scanned or image-only, confirm Tesseract OCR is installed or bundled with the EXE being used.",
             "Rerun the affected NEEDS RERUN row after OCR support is confirmed.",
             "If OCR is available but the same PDF still fails, send the PDF plus this report for parser review.",
         ),
         "related_lni": (
             "Check whether the required counsel LNI exists in the mapping sheet.",
-            "Confirm the counsel row is DONE before rerunning the related main opinion.",
+            "Confirm in IRT that the counsel was saved with Archive routing and Ready to Process before rerunning its main opinion.",
             "If counsel is missing, add or route the counsel first, then rerun the main opinion row.",
             "If the counsel exists but will not attach, send the report so the related-LNI flow can be checked.",
         ),
@@ -890,7 +760,7 @@ def _critical_troubleshooting_steps(payload, run_status_summary):
             "Open the attached mapping sheet and check whether any rows are marked NEEDS RERUN.",
             "If rows need rerun, rerun the same sheet and leave DONE or ALREADY PROCESSED rows unchanged.",
             "Review the attached current log for the first ERROR near the bottom of the run.",
-            "If the same issue repeats, send the full report folder for review.",
+            "If the same issue repeats, send the attached run log and mapping sheet for review.",
         ),
     }
     return playbooks.get(issue_key, playbooks["general"])
@@ -898,6 +768,27 @@ def _critical_troubleshooting_steps(payload, run_status_summary):
 
 def _format_troubleshooting_steps(steps):
     return [f"{index}. {step}" for index, step in enumerate(steps, start=1)]
+
+
+def _email_first_name():
+    """Resolve the app user's first name, independent of report recipients."""
+    try:
+        name = clean_display_name(get_full_username()).split()
+        if name and name[0].casefold() not in {"user", "unknown"}:
+            return name[0][:1].upper() + name[0][1:]
+    except Exception:
+        logging.debug("User name unavailable for email signature.", exc_info=True)
+    return ""
+
+
+def _email_greeting():
+    first_name = _email_first_name()
+    return f"Hi {first_name}," if first_name else "Hi there,"
+
+
+def _email_signature():
+    first_name = _email_first_name()
+    return f"{first_name}'s Autorouter" if first_name else "Your Autorouter"
 
 
 def _build_critical_email_body(payload, report_dir, theme=None):
@@ -934,7 +825,7 @@ def _build_critical_email_body(payload, report_dir, theme=None):
 
     status_lines = _format_run_status_counts(run_status_summary)
     if status_lines:
-        lines.extend(["", "Rerun-ready status:", *status_lines])
+        lines.extend(["", "Rerun-Ready Status:", *status_lines])
         example_lines = _format_run_status_examples(run_status_summary)
         if example_lines:
             lines.extend(["", *example_lines])
@@ -943,7 +834,7 @@ def _build_critical_email_body(payload, report_dir, theme=None):
     if troubleshooting_steps:
         lines.extend([
             "",
-            "Suggested next steps:",
+            "Suggested Next Steps:",
             *_format_troubleshooting_steps(troubleshooting_steps),
         ])
 
@@ -951,11 +842,9 @@ def _build_critical_email_body(payload, report_dir, theme=None):
         "",
         theme["attachments"],
         "",
-        "Report folder:",
-        str(report_dir),
-        "",
         theme["closer"],
-        "- Your SMD Autorouter",
+        "",
+        _email_signature(),
         "",
         build_version_footer(payload.get("build_info")),
     ])
@@ -1020,7 +909,7 @@ def _build_success_email_body(mode, counts, report_dir, theme=None, run_status_s
     if manual_review_count:
         lines.extend([
             "",
-            "Manual review required:",
+            "Manual Review Required:",
             _format_count_line("Documents skipped safely", manual_review_count),
             "No IRT changes were made for these documents.",
             *_format_manual_review_examples(run_status_summary),
@@ -1030,11 +919,9 @@ def _build_success_email_body(mode, counts, report_dir, theme=None, run_status_s
         "",
         theme["attachments"],
         "",
-        "Report folder:",
-        str(report_dir),
-        "",
         theme["closer"],
-        "- Your SMD Autorouter",
+        "",
+        _email_signature(),
         "",
         build_version_footer(build_info),
     ])
@@ -1082,7 +969,79 @@ def _valid_email(value):
     return "@" in value and "." in value.split("@", 1)[-1]
 
 
-def _send_outlook_email(subject, body, attachments, config):
+def _render_email_html(body, *, critical=False):
+    """Render escaped report text as simple, inline-styled Outlook HTML."""
+    accent = "#92400e" if critical else "#6d4bb3"
+    heading = "Action Needed" if critical else "Run Summary"
+    parts = []
+    for block in re.split(r"\n\s*\n", body.strip()):
+        lines = block.splitlines()
+        table_start = next((i for i, line in enumerate(lines)
+                            if line.startswith("- ") and ": " in line), None)
+        if table_start is not None:
+            if table_start:
+                parts.append('<p style="margin:0;font-weight:600;">'
+                             + '<br>'.join(escape(line) for line in lines[:table_start]) + '</p>')
+            rows = []
+            trailing = []
+            for line in lines[table_start:]:
+                if line.startswith("- ") and ": " in line:
+                    label, value = line[2:].split(": ", 1)
+                    background = "#f7f6fb" if len(rows) % 2 == 0 else "#ffffff"
+                    rows.append(
+                        f'<tr style="background-color:{background};">'
+                        '<th scope="row" align="left" valign="top" width="44%" '
+                        'style="padding:11px 14px;border-bottom:1px solid #e2e8f0;font-family:Segoe UI,Arial,sans-serif;font-size:14px;line-height:21px;font-weight:500;">'
+                        + escape(label) + '</th>'
+                        '<td valign="top" style="padding:11px 14px;border-bottom:1px solid #e2e8f0;font-family:Segoe UI,Arial,sans-serif;font-size:14px;line-height:21px;word-break:break-word;">'
+                        + escape(value) + '</td></tr>'
+                    )
+                else:
+                    trailing.append(line)
+            parts.append('<table aria-label="Report details" width="100%" cellpadding="0" cellspacing="0" '
+                         'style="border-collapse:collapse;border:1px solid #e2e8f0;mso-table-lspace:0pt;mso-table-rspace:0pt;">'
+                         + ''.join(rows) + '</table>')
+            if trailing:
+                parts.append('<p style="margin:0;">' + '<br>'.join(escape(line) for line in trailing) + '</p>')
+        elif any(re.match(r"^\d+\. ", line) for line in lines):
+            intro = [line for line in lines if not re.match(r"^\d+\. ", line)]
+            if intro:
+                parts.append('<p style="margin:0;font-weight:600;">' + '<br>'.join(escape(line) for line in intro) + '</p>')
+            parts.append('<ol style="margin:0;padding-left:24px;">' + ''.join(
+                '<li style="margin-bottom:8px;">' + escape(re.sub(r"^\d+\. ", "", line)) + '</li>'
+                for line in lines if re.match(r"^\d+\. ", line)
+            ) + '</ol>')
+        else:
+            footer = any(line.startswith(("EXE built:", "SADM Autorouter version")) for line in lines)
+            style = "margin:0;overflow-wrap:anywhere;"
+            if footer:
+                style += "font-size:12px;color:#635d73;border-top:1px solid #e2e8f0;padding-top:16px;"
+            parts.append(f'<p style="{style}">' + '<br>'.join(escape(line) for line in lines) + '</p>')
+    # Outlook's Word renderer does not reliably preserve margins around tables.
+    # Cell padding supplies one consistent gap around every content block,
+    # including table headings, following paragraphs, lists, and other tables.
+    content_rows = ''.join(
+        '<tr><td valign="top" style="padding:0 0 ' + ('20px' if index < len(parts)-1 else '0')
+        + ';font-family:Segoe UI,Arial,sans-serif;font-size:15px;line-height:24px;">'
+        + part + '</td></tr>' for index, part in enumerate(parts)
+    )
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8"></head>'
+        '<body style="margin:0;padding:32px 12px;background-color:#f4f2f8;color:#292638;">'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">'
+        '<table role="presentation" width="640" cellpadding="0" cellspacing="0" '
+        'style="width:100%;max-width:640px;background-color:#ffffff;font-family:Segoe UI,Arial,sans-serif;font-size:15px;line-height:1.65;">'
+        f'<tr><td style="padding:22px 28px;border-top:4px solid {accent};border-bottom:1px solid #e2e8f0;">'
+        '<span style="font-size:12px;letter-spacing:0.6px;color:#635d73;">SADM Autorouter</span>'
+        f'<h1 style="margin:5px 0 0;font-size:24px;font-weight:600;color:{accent};">{heading}</h1></td></tr>'
+        '<tr><td style="padding:24px 28px;">'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        'style="border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">'
+        + content_rows + '</table></td></tr></table></td></tr></table></body></html>'
+    )
+
+
+def _send_outlook_email(subject, body, attachments, config, *, critical=False):
     import pythoncom
     import win32com.client
 
@@ -1117,7 +1076,8 @@ def _send_outlook_email(subject, body, attachments, config):
             pass
         mail.To = recipients_text
         mail.Subject = subject
-        mail.Body = body
+        mail.BodyFormat = 2  # Outlook olFormatHTML
+        mail.HTMLBody = _render_email_html(body, critical=critical)
         mail.Save()
         for attachment in attachments:
             if attachment and Path(attachment).exists():
@@ -1269,7 +1229,7 @@ def notify_critical_error(
     body = _build_critical_email_body(payload, report_dir, email_theme)
 
     try:
-        _send_outlook_email(subject, body, attachments, config)
+        _send_outlook_email(subject, body, attachments, config, critical=True)
     except Exception as exc:
         logging.warning("Critical report saved to %s, but Outlook email failed: %s", report_dir, exc)
 

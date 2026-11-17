@@ -183,6 +183,131 @@ class FERCExtractorTests(unittest.TestCase):
         self.assertTrue(is_ferc_row({"CourtCode": "FDFERC00"}))
         self.assertFalse(is_ferc_row({"CourtCode": "FDFCC000"}))
 
+    def test_letter_uses_header_date_docket_and_citation_only(self):
+        metadata = self.parse("""
+            197 FERC ¶ 61,095
+            FEDERAL ENERGY REGULATORY COMMISSION
+            WASHINGTON, DC 20426
+            November 5, 2026
+            In Reply Refer To:
+            Tri-State Generation and Transmission Association, Inc.
+            Docket No. ER26-1929-002
+            Willkie Farr & Gallagher LLP
+            1875 K Street, NW
+            Washington, DC 20006
+            Attention: Fredrick Wilson
+            Dear Mr. Wilson:
+            On September 9, 2026, Tri-State submitted revisions.
+            The Commission's order issued on August 14, 2026 applies.
+            In Docket No. ER25-3316-000, Tri-State proposed a tariff.
+            196 FERC ¶ 61,127 (2026).
+        """)
+        self.assertEqual("Letter", metadata.source_detail)
+        self.assertEqual("Dear Mr. Wilson:", metadata.title_hint)
+        self.assertEqual("ER26-1929-002", metadata.docket_number)
+        self.assertEqual((), metadata.other_numbers)
+        self.assertEqual("11-05-2026", metadata.decision_date)
+        self.assertEqual("197 FERC ¶ 61,095", metadata.comments_text)
+        self.assertFalse(metadata.requires_review)
+
+    def test_letter_accepts_issued_date_prefix_variants(self):
+        for date_line in (
+            "Issued:  November 6, 2026",
+            "Issued:November 6, 2026",
+            "Issued : November 6, 2026",
+            "Issued November 6, 2026",
+            "Issued on November 6, 2026",
+            "November 6, 2026",
+        ):
+            with self.subTest(date_line=date_line):
+                metadata = self.parse(f"""
+                    197 FERC ¶ 62,072
+                    FEDERAL ENERGY REGULATORY COMMISSION
+                    WASHINGTON, DC 20426
+                    OFFICE OF ENERGY MARKET REGULATION
+                    In Reply Refer To:
+                    US Borax Inc.
+                    Docket Nos. EL26-97-000
+                    QF82-202-002
+                    {date_line}
+                    Damien R. Lyster
+                    Kirkland & Ellis LLP
+                    Reference: Request for Waiver of Efficiency Standards
+                    Dear Mr. Lyster:
+                    On August 10, 2026, you submitted a petition.
+                    Issued: August 14, 2026
+                    Docket No. QF82-202-000
+                """)
+                self.assertEqual("11-06-2026", metadata.decision_date)
+                self.assertEqual("Letter", metadata.source_detail)
+                self.assertEqual("EL26-97-000", metadata.docket_number)
+                self.assertEqual(("QF82-202-002",), metadata.other_numbers)
+                self.assertEqual("197 FERC ¶ 62,072; QF82-202-002", metadata.comments_text)
+                self.assertFalse(metadata.requires_review)
+
+    def test_letter_invalid_issued_date_does_not_use_body_date(self):
+        metadata = self.parse("""
+            197 FERC ¶ 62,072
+            FEDERAL ENERGY REGULATORY COMMISSION
+            Docket No. EL26-97-000
+            Issued: November 31, 2026
+            Dear Mr. Lyster:
+            Issued: November 6, 2026
+        """)
+        self.assertEqual("", metadata.decision_date)
+        self.assertEqual("NEEDS REVIEW", metadata.review_status)
+        self.assertTrue(metadata.requires_review)
+
+    def test_letter_preserves_multiple_header_dockets_and_ignores_body_heading(self):
+        metadata = self.parse("""
+            197 FERC ¶ 61,095
+            November 5, 2026
+            Docket Nos. ER26-1929-002 and ER26-1929-003
+            Dear Counsel,
+            ORDER REFERENCED IN YOUR REQUEST
+            Issued August 14, 2026
+        """)
+        self.assertEqual("Letter", metadata.source_detail)
+        self.assertEqual(("ER26-1929-003",), metadata.other_numbers)
+        self.assertEqual("11-05-2026", metadata.decision_date)
+
+    def test_letter_missing_header_fields_still_requires_review(self):
+        metadata = self.parse("""
+            November 5, 2026
+            Dear Mr. Wilson:
+            This references Docket No. ER26-1929-002 and 197 FERC ¶ 61,095.
+        """)
+        self.assertEqual("Letter", metadata.source_detail)
+        self.assertEqual("", metadata.docket_number)
+        self.assertEqual("", metadata.comments_text)
+        self.assertTrue(metadata.requires_review)
+
+    def test_letter_date_is_nearest_top_citation(self):
+        metadata = self.parse("""
+            197 FERC ¶ 61,095
+            FEDERAL ENERGY REGULATORY COMMISSION
+            November 5, 2026
+            Docket No. ER26-1929-002
+            In Reply Refer To:
+            September 9, 2026
+            Dear Mr. Wilson:
+            Issued August 14, 2026
+        """)
+        self.assertEqual("Letter", metadata.source_detail)
+        self.assertEqual("11-05-2026", metadata.decision_date)
+
+    def test_formal_order_with_body_salutation_remains_order(self):
+        metadata = self.parse("""
+            197 FERC ¶ 61,095
+            Docket No. ER26-1929-002
+            ORDER ACCEPTING FILING
+            (Issued November 5, 2026)
+            Dear Counsel:
+            Quoted correspondence follows.
+        """)
+        self.assertEqual("Order", metadata.source_detail)
+        self.assertFalse(metadata.requires_review)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,43 @@
+{
+  "tool": "Built-in image_gen",
+  "transparent_background": true,
+  "production_size": "256x256 RGBA, resized with padding for desktop UI",
+  "icons": [
+    {
+      "category": "skin",
+      "source": "C:\\Users\\libunak\\.codex\\generated_images\\01a1c1c1-d96b-7d40-a76e-6cb720a12e63\\exec-d6f99cad-b085-4377-abfd-f66b7eeca2a3.png",
+      "asset": "assets/images/catalog_categories/skin.png",
+      "prompt": "Use case: stylized-concept. Asset type: finished desktop-style category icon for a dark sci-fi game inventory in SADM Autorouter. Primary request: a single beautifully authored holographic prism representing visual Themes. A sculpted faceted crystal with a subtle inset display facet, obsidian glass and brushed titanium construction, restrained electric cyan and violet edge light. Premium modern game loot icon, dimensional digital illustration with precise silhouette and softly polished materials, legible at 72 px, sophisticated rather than busy. Square composition, centered object, consistent front three-quarter view, object fills 75% of image, generous transparent padding, no background scene, no floor, no cast shadow outside the object, no frame or icon tile, no text, no watermark. This is the first of a cohesive six-icon category set."
+    },
+    {
+      "category": "header",
+      "source": "C:\\Users\\libunak\\.codex\\generated_images\\01a1c1c1-d96b-7d40-a76e-6cb720a12e63\\exec-b3400131-2906-4ed0-96c8-4c89eb2c97aa.png",
+      "asset": "assets/images/catalog_categories/header.png",
+      "prompt": "Use case: stylized-concept. Asset type: finished desktop-style category icon for the dark sci-fi game inventory in SADM Autorouter. A single beautifully authored premium modern game loot icon, dimensional digital illustration with precise silhouette, obsidian glass and brushed titanium construction, softly polished materials, restrained emissive accents. Legible at 72 px; sophisticated, cohesive, not busy. Square composition, centered single object, front three-quarter view, object fills 75% of image, generous transparent padding. No background scene, no floor, no external cast shadow, no frame or icon tile, no watermark. A compact floating widescreen display with a sculpted titanium frame, showing a luminous gold moon over a simple rose-pink horizon on dark violet glass. This icon represents Wallpapers. Warm gold and pink light accents. No text."
+    },
+    {
+      "category": "font",
+      "source": "C:\\Users\\libunak\\.codex\\generated_images\\01a1c1c1-d96b-7d40-a76e-6cb720a12e63\\exec-e8729823-7c95-4f57-b6bb-90c9d6782ef4.png",
+      "asset": "assets/images/catalog_categories/font.png",
+      "prompt": "Use case: stylized-concept. Asset type: finished desktop-style category icon for the dark sci-fi game inventory in SADM Autorouter. A single beautifully authored premium modern game loot icon, dimensional digital illustration with precise silhouette, obsidian glass and brushed titanium construction, softly polished materials, restrained emissive accents. Legible at 72 px; sophisticated, cohesive, not busy. Square composition, centered single object, front three-quarter view, object fills 75% of image, generous transparent padding. No background scene, no floor, no external cast shadow, no frame or icon tile, no watermark. A sculpted pair of typographic letterforms Aa, one uppercase A and a lowercase a, made of dark glass and silver titanium with mint green and soft cyan rim light. This icon represents Fonts. The only lettering is Aa. Clear sophisticated type specimen, no other text."
+    },
+    {
+      "category": "emoji",
+      "source": "C:\\Users\\libunak\\.codex\\generated_images\\01a1c1c1-d96b-7d40-a76e-6cb720a12e63\\exec-9fdd9126-588d-4cd5-8cd7-b49caadb5970.png",
+      "asset": "assets/images/catalog_categories/emoji.png",
+      "prompt": "Use case: stylized-concept. Asset type: finished desktop-style category icon for the dark sci-fi game inventory in SADM Autorouter. A single beautifully authored premium modern game loot icon, dimensional digital illustration with precise silhouette, obsidian glass and brushed titanium construction, softly polished materials, restrained emissive accents. Legible at 72 px; sophisticated, cohesive, not busy. Square composition, centered single object, front three-quarter view, object fills 75% of image, generous transparent padding. No background scene, no floor, no external cast shadow, no frame or icon tile, no watermark. A single expressive softly smiling spherical holographic face, dark smoky rose glass, warm gold and pink emissive eyes and small smile, a silver lower crescent collar. This icon represents Emojis. Appealing and sleek rather than cartoonish. No text."
+    },
+    {
+      "category": "badge",
+      "source": "C:\\Users\\libunak\\.codex\\generated_images\\01a1c1c1-d96b-7d40-a76e-6cb720a12e63\\exec-c2156117-b91a-4d8e-bf8f-70d0a329f320.png",
+      "asset": "assets/images/catalog_categories/badge.png",
+      "prompt": "Use case: stylized-concept. Asset type: finished desktop-style category icon for the dark sci-fi game inventory in SADM Autorouter. A single beautifully authored premium modern game loot icon, dimensional digital illustration with precise silhouette, obsidian glass and brushed titanium construction, softly polished materials, restrained emissive accents. Legible at 72 px; sophisticated, cohesive, not busy. Square composition, centered single object, front three-quarter view, object fills 75% of image, generous transparent padding. No background scene, no floor, no external cast shadow, no frame or icon tile, no watermark. An elegant achievement medallion: a sculpted silver shield surrounding a violet crystal star, discreet laurel leaves and cyan edge light. This icon represents Achievement Badges. Premium reward collectible. No text."
+    },
+    {
+      "category": "game",
+      "source": "C:\\Users\\libunak\\.codex\\generated_images\\01a1c1c1-d96b-7d40-a76e-6cb720a12e63\\exec-07c9d33a-3d62-49a7-9c1a-7658e7a31846.png",
+      "asset": "assets/images/catalog_categories/game.png",
+      "prompt": "Use case: stylized-concept. Asset type: finished desktop-style category icon for the dark sci-fi game inventory in SADM Autorouter. A single beautifully authored premium modern game loot icon, dimensional digital illustration with precise silhouette, obsidian glass and brushed titanium construction, softly polished materials, restrained emissive accents. Legible at 72 px; sophisticated, cohesive, not busy. Square composition, centered single object, front three-quarter view, object fills 75% of image, generous transparent padding. No background scene, no floor, no external cast shadow, no frame or icon tile, no watermark. A compact beautifully designed futuristic game controller, dark obsidian shell with brushed titanium trim, clear silhouette, cyan D-pad and mint/violet small circular buttons. This icon represents Games. No lettering, no brand marks, no text."
+    }
+  ]
+}

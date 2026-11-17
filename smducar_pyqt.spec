@@ -6,10 +6,8 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 sys.path.insert(0, str(Path(SPECPATH)))
 from core.build_info import write_build_manifest
 
-# IMPORTANT: Python 3.13 has a known compatibility issue with PyInstaller
-# If you encounter "AttributeError: class must define a '_type_' attribute",
-# please use Python 3.11 or 3.12 instead. See PYTHON_3.13_FIX.md for details.
-# The build_exe.bat script uses Python 3.12 to avoid this issue.
+# This is the Qt5 engine. build_with_loader.py packages it with the separate
+# Qt6 launcher, keeping the two bindings out of each other's dependency graphs.
 
 # Collect data files (assets, config, etc.)
 build_manifest = write_build_manifest(Path(workpath) / 'build_metadata')
@@ -84,6 +82,7 @@ a = Analysis(
     # uses PyQt5, so keep optional bindings installed in a developer's Python
     # environment out of the executable.
     excludes=[
+        'frontend.rpg',  # Archivist Trials lives only in the sandbox
         'PyQt6',
         'PyQt6.QtCore',
         'PyQt6.QtGui',

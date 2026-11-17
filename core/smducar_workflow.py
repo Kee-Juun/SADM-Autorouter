@@ -111,7 +111,7 @@ from .chromedriver_resolver import (
 )
 
 
-MAX_PARALLEL_ROUTERS = 6
+MAX_PARALLEL_ROUTERS = 10
 # These statuses are only emitted before filling/submitting the IRT form.
 # Never auto-replay a generic error, review stop, or unconfirmed Save.
 ITC_PRE_SAVE_RECOVERY_STATUSES = {

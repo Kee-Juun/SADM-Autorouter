@@ -433,8 +433,8 @@ class SMDDateCleanupSelectionTests(unittest.TestCase):
         self.assertEqual(_count_results_for_rows(df, False, False, False, current_run_only=True), (0, 0, 0, 1, 0, 0))
         theme = {"hello": "Hello", "opener": "{app_name}", "scoreboard": "Results", "attachments": "Reports", "closer": "Done"}
         body = _build_success_email_body("smd", {"main_already": 1}, "reports", theme, run_status_summary=summary)
-        self.assertIn("Decision dates updated (no new routing): 1", body)
-        self.assertIn("Total routed: 0", body)
+        self.assertIn("Decision Dates Updated (No New Routing): 1", body)
+        self.assertIn("Total Routed: 0", body)
 
     def test_other_router_rows_are_not_date_cleanup_candidates(self):
         for court in ("FDIRSPLR", "FDPLR000", "FDCCA001", "FDFCC000", "FDFERC00", "FDNLRB00", "FDMSPB00", "STOHTAX0", "STMEWORK", "MOSU00"):

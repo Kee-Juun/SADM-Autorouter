@@ -1,5 +1,8 @@
 import sys
 import os
+from core.startup_progress import report_startup
+
+report_startup("Loading Spreadsheet Tools", 18)
 from openpyxl import load_workbook
 from pathlib import Path
 import json
@@ -18,13 +21,14 @@ from PyQt5.QtWidgets import QGraphicsDropShadowEffect, QApplication, QWidget, QL
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFontDatabase, QFont, QPixmap, QPainter, QIcon, QBrush, QImage, QPainterPath
 from PyQt5.QtWidgets import QGraphicsOpacityEffect, QGraphicsBlurEffect
+report_startup("Loading Browser and Routing Tools", 26)
 from core.smducar import (
     create_folders, generate_excel, open_excel_file,
     setup_logging, get_latest_excel_file, read_mapping_data,
     load_config, CaseLawRouter, filter_mapping_data,
     split_username
 )
-from core.smducar_workflow import run_automation_workflow
+from core.smducar_workflow import MAX_PARALLEL_ROUTERS, run_automation_workflow
 from core.critical_error_notifier import notify_critical_error
 from core.rerun_status import finalize_rerun_ready_statuses
 from utils.router_usage import rank_router_groups, record_router_run
@@ -60,6 +64,7 @@ from PyQt5.QtGui import QPainter, QColor, QBrush, QFont, QLinearGradient
 from PyQt5.QtCore import QRectF, Qt
 
 # Shared widgets extracted to a dedicated module
+report_startup("Loading Interface Components", 46)
 from .pyqt_widgets import (
     PillProgressBar,
     CenteredComboBox,
@@ -701,7 +706,9 @@ class SMDUSAPGui(QMainWindow):
         self.idle_message_queue = []
 
         # Load fonts and config
+        report_startup("Loading Fonts", 70)
         self.load_fonts()
+        report_startup("Reading Your Settings", 74)
         self.config = self.load_config()
         
         # Set initial title and application name based on mode
@@ -711,6 +718,7 @@ class SMDUSAPGui(QMainWindow):
         QCoreApplication.setApplicationName(app_title)
         
         # Initialize UI
+        report_startup("Loading Images and Building Your Workspace", 79)
         self.initUI()
         
         # Sync the title bar mode dropdown after UI creation.
@@ -769,6 +777,7 @@ class SMDUSAPGui(QMainWindow):
         self.fade_anim.setEndValue(1.0)
         self.fade_anim.start()
 
+        report_startup("Applying Your Theme", 91)
         self.apply_equipped_rewards()
         self.update_level_display()
 
@@ -881,7 +890,7 @@ class SMDUSAPGui(QMainWindow):
         self.auto_save_config()
 
     def on_parallel_router_instances_changed(self, value):
-        self.config["parallel_router_instances"] = max(1, min(int(value), 6))
+        self.config["parallel_router_instances"] = max(1, min(int(value), MAX_PARALLEL_ROUTERS))
         self.config["parallel_lni_limit"] = 0
         self.auto_save_config()
 
@@ -1341,7 +1350,7 @@ class SMDUSAPGui(QMainWindow):
                     ) or 2)
                 except (TypeError, ValueError):
                     parallel_router_instances = 2
-                config["parallel_router_instances"] = max(1, min(parallel_router_instances, 6))
+                config["parallel_router_instances"] = max(1, min(parallel_router_instances, MAX_PARALLEL_ROUTERS))
                 config["critical_error_email_enabled"] = config.get("critical_error_email_enabled", True)
                 config["run_summary_email_enabled"] = config.get("run_summary_email_enabled", True)
                 config["critical_error_developer_email"] = config.get(
@@ -2631,7 +2640,7 @@ class SMDUSAPGui(QMainWindow):
         parallel_instances_label = QLabel("Router Instances")
         parallel_instances_label.setFont(QFont(self.axiforma_family, 8))
         self.parallel_router_instances_spin = QSpinBox()
-        self.parallel_router_instances_spin.setRange(1, 6)
+        self.parallel_router_instances_spin.setRange(1, MAX_PARALLEL_ROUTERS)
         self.parallel_router_instances_spin.setValue(int(self.config.get("parallel_router_instances", 2) or 2))
         self.parallel_router_instances_spin.setStyleSheet(spin_style)
         self.parallel_router_instances_spin.valueChanged.connect(self.on_parallel_router_instances_changed)

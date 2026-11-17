@@ -26,6 +26,8 @@ from PyQt5.QtCore import QRect, QRectF
 # Import dependencies
 from core.smducar_config import resource_path
 from .pyqt_widgets import CustomTooltipWidget, OverlayWidget
+from .catalog_browser import CatalogBrowser
+from utils.inventory_order import inventory_order, record_acquisition, record_usage
 
 # Import from utils.rewards
 from utils.rewards import (
@@ -137,9 +139,8 @@ def _load_reward_font_family(reward):
 
 def _catalog_dialog_style(font_family=None):
     """Shared game-store styling for Shop and Inventory dialogs."""
-    font_stack = _font_stack(font_family)
     return """
-        QDialog {
+        QDialog#CatalogDialog {
             background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                 stop:0 #070A16, stop:0.48 #14142B, stop:1 #071A27);
             color: #F7FBFF;
@@ -148,7 +149,7 @@ def _catalog_dialog_style(font_family=None):
         }
         QLabel {
             color: #F7FBFF;
-            font-family: """ + font_stack + """;
+            font-family: """ + _font_family_qss(font_family) + """;
             background: transparent;
             border: none;
         }
@@ -1731,6 +1732,8 @@ class ModernConfirmDialog(QDialog):
 class ShopDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("CatalogDialog")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self._shop_tooltip = None
         self._category_sections = {}
         self._expanded_category = None
@@ -1817,6 +1820,7 @@ class ShopDialog(QDialog):
         # User level display
         user_level = self.user_data.get('level', 0)
         title_label = QLabel(f"LEVEL {user_level}")
+        self.level_label = title_label
         title_label.setStyleSheet("""
             font-size: 18px;
             font-weight: 900;
@@ -1842,104 +1846,28 @@ class ShopDialog(QDialog):
         self.layout.addWidget(header_frame)
         self.update_coin_label()
         
-        # Scroll area for rewards
-        scroll = QScrollArea()
-        self.shop_scroll = scroll
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(_catalog_scroll_area_style())
-        
-        content = QWidget()
-        content.setStyleSheet("""
-            QWidget {
-                background: transparent;
-                border: none;
-            }
-        """)
-        self.rewards_layout = QVBoxLayout(content)
-        self.rewards_layout.setSpacing(10)
-        self.rewards_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Group rewards by type and sort by price ascending
-        from collections import defaultdict
-        rewards_by_type = defaultdict(list)
-        for reward_id, reward in REWARDS.items():
-            if is_reward_purchasable(reward):
-                rewards_by_type[reward['type']].append((reward_id, reward))
-        for reward_type, section_title in SHOP_SECTIONS:
-            if reward_type in rewards_by_type:
-                entries = sorted(rewards_by_type[reward_type], key=lambda x: x[1]['price'])
-                self.add_shop_section(reward_type, section_title, entries)
-        
-        scroll.setWidget(content)
-        self.layout.addWidget(scroll)
+        self.catalog_browser = CatalogBrowser(
+            self, entries=self._shop_entries(), sections=SHOP_SECTIONS,
+            row_factory=self.reward_row, icon_dir=IMAGES_DIR / "catalog_categories")
+        self.shop_scroll = self.catalog_browser.scroll
+        self.rewards_layout = self.catalog_browser.items_layout
+        self.layout.addWidget(self.catalog_browser, 1)
 
-    def add_shop_section(self, reward_type, section_title, entries):
-        """Add one collapsible Shop category section."""
-        entries = _equipped_first(entries, self.user_data)
-        section_frame = QFrame()
-        section_frame.setObjectName("CatalogSection")
-        section_frame.setStyleSheet(_catalog_section_style())
-        section_layout = QVBoxLayout(section_frame)
-        section_layout.setSpacing(8)
-        section_layout.setContentsMargins(8, 8, 8, 8)
+    def _shop_entries(self):
+        entries = [(key, {**reward, "display_name": get_reward_display_name(key, reward)})
+                   for key, reward in REWARDS.items() if is_reward_purchasable(reward)]
+        return _equipped_first(sorted(entries, key=lambda item: int(item[1].get('price', 0))), self.user_data)
 
-        header_frame, action_label = _create_catalog_category_header(
-            reward_type,
-            section_title,
-            len(entries),
-            False,
-            self.toggle_category,
-        )
-        section_layout.addWidget(header_frame)
 
-        items_widget = QWidget()
-        items_layout = QVBoxLayout(items_widget)
-        items_layout.setSpacing(8)
-        items_layout.setContentsMargins(0, 0, 0, 0)
-        for reward_id, reward in entries:
-            items_layout.addLayout(self.reward_row(reward_id, reward))
-        items_widget.setVisible(False)
-        section_layout.addWidget(items_widget)
-
-        self._category_sections[reward_type] = {
-            "frame": section_frame,
-            "header": header_frame,
-            "action": action_label,
-            "items": items_widget,
-            "title": section_title,
-        }
-        self.rewards_layout.addWidget(section_frame)
 
     def toggle_category(self, reward_type):
-        """Open one category at a time; clicking the open one closes it."""
-        next_category = None if self._expanded_category == reward_type else reward_type
-        self.apply_category_expansion(next_category)
+        self.apply_category_expansion(None if self._expanded_category == reward_type else reward_type)
 
     def apply_category_expansion(self, reward_type, scroll=True):
-        """Apply the accordion state after a click or content refresh."""
-        self._expanded_category = reward_type if reward_type in self._category_sections else None
-        for key, section in self._category_sections.items():
-            expanded = key == self._expanded_category
-            section["items"].setVisible(expanded)
-            section["header"].setStyleSheet(_catalog_category_header_style(key, expanded))
-            section["action"].setText(_catalog_category_action_text(expanded))
-        if scroll and self._expanded_category:
-            self.scroll_to_category_first_item(self._expanded_category)
+        self.catalog_browser.open_category(reward_type)
 
     def scroll_to_category_first_item(self, reward_type):
-        """Move the opened Shop category so its first item is visible."""
-        def do_scroll():
-            section = self._category_sections.get(reward_type)
-            scroll = getattr(self, "shop_scroll", None)
-            if not section or not scroll or not section["items"].isVisible():
-                return
-            content = scroll.widget()
-            if not content:
-                return
-            y = section["items"].mapTo(content, QPoint(0, 0)).y()
-            scroll.verticalScrollBar().setValue(max(0, y - 8))
-
-        QTimer.singleShot(40, do_scroll)
+        self.catalog_browser.open_category(reward_type)
 
     def unequip_row(self, reward_type):
         # Create a frame for the unequip section
@@ -2385,6 +2313,9 @@ class ShopDialog(QDialog):
                 box.exec_()
                 return
             
+            if reward_id in user_data.get('unlocked', []):
+                return
+
             if user_coins < reward_price:
                 logging.warning(f"Not enough coins. Need {reward_price}, have {user_coins}")
                 return
@@ -2397,6 +2328,7 @@ class ShopDialog(QDialog):
                 user_data['unlocked'] = []
             if reward_id not in user_data['unlocked']:
                 user_data['unlocked'].append(reward_id)
+                record_acquisition(user_data, reward_id)
             
             # Save updated user data
             save_user_rewards(user_data)
@@ -2417,93 +2349,26 @@ class ShopDialog(QDialog):
         return ModernMessageBox(title, message, "info", self)
 
     def refresh_shop(self):
-        """Refresh the shop display after changes"""
-        expanded_category = self._expanded_category
+        self.user_data = load_user_rewards()
         self.catalog_font_family = _catalog_font_family(self.parent())
         self.setFont(QFont(self.catalog_font_family, 10))
         self.setStyleSheet(_catalog_dialog_style(self.catalog_font_family))
-        # Clear existing layout items (excluding title bar)
-        while self.layout.count() > 1:
-            child = self.layout.takeAt(1)
-            if child.widget():
-                child.widget().deleteLater()
-        
-        # Rebuild shop content
-        self.build_shop_content(expanded_category=expanded_category)
+        self.level_label.setText(f"LEVEL {self.user_data.get('level', 0)}")
+        self.update_coin_label()
+        self.catalog_browser.refresh(self._shop_entries())
     
     def build_shop_content(self, expanded_category=None):
-        """Build the shop content"""
-        self._category_sections = {}
-        self._expanded_category = None
-        # Clear existing content (excluding title bar)
-        while self.layout.count() > 1:
-            child = self.layout.takeAt(1)
-            if child.widget():
-                child.widget().deleteLater()
-        
-        # Rebuild the shop content
-        from PyQt5.QtWidgets import QScrollArea, QWidget, QVBoxLayout, QFrame, QLabel
-        from PyQt5.QtCore import Qt
-        from collections import defaultdict
-        from utils.rewards import REWARDS
-        
-        # Header frame with coins
-        header_frame = QFrame()
-        header_frame.setObjectName("CatalogSummary")
-        header_frame.setStyleSheet(_catalog_summary_style())
-        header_layout = QHBoxLayout(header_frame)
-        header_layout.setContentsMargins(14, 10, 14, 10)
-        header_layout.setSpacing(10)
-        
-        # Coin display
-        self.coin_label = QLabel(f"COINS {self.user_data.get('coins', 0)}  |  XP {self.user_data.get('xp', 0)}")
-        self.coin_label.setStyleSheet("""
-            color: #FFD36E;
-            font-size: 14px;
-            font-weight: 900;
-        """)
-        header_layout.addWidget(self.coin_label)
-        
-        self.layout.addWidget(header_frame)
-        
-        # Scroll area for rewards
-        scroll = QScrollArea()
-        self.shop_scroll = scroll
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(_catalog_scroll_area_style())
-        
-        content = QWidget()
-        content.setStyleSheet("""
-            QWidget {
-                background: transparent;
-                border: none;
-            }
-        """)
-        self.rewards_layout = QVBoxLayout(content)
-        self.rewards_layout.setSpacing(10)
-        self.rewards_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Group rewards by type and sort by price ascending
-        rewards_by_type = defaultdict(list)
-        for reward_id, reward in REWARDS.items():
-            if is_reward_purchasable(reward):
-                rewards_by_type[reward['type']].append((reward_id, reward))
-        
-        for reward_type, section_title in SHOP_SECTIONS:
-            if reward_type in rewards_by_type:
-                entries = sorted(rewards_by_type[reward_type], key=lambda x: x[1]['price'])
-                self.add_shop_section(reward_type, section_title, entries)
-        
-        scroll.setWidget(content)
-        self.layout.addWidget(scroll)
+        self.refresh_shop()
         if expanded_category:
-            self.apply_category_expansion(expanded_category)
+            self.catalog_browser.open_category(expanded_category)
 
 
 
 class InventoryDialog(QDialog):
     def __init__(self, parent=None, focus_reward_id=None):
         super().__init__(parent)
+        self.setObjectName("CatalogDialog")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self._inventory_tooltip = None
         self.focus_reward_id = focus_reward_id
         self._inventory_rows = {}
@@ -2613,44 +2478,15 @@ class InventoryDialog(QDialog):
         
         content_layout.addWidget(header_frame)
         
-        # Scroll area for owned items
-        scroll = QScrollArea()
-        self.inventory_scroll = scroll
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(_catalog_scroll_area_style())
-        
-        content = QWidget()
-        content.setStyleSheet("""
-            QWidget {
-                background: transparent;
-                border: none;
-            }
-        """)
-        self.inventory_layout = QVBoxLayout(content)
-        self.inventory_layout.setSpacing(10)
-        self.inventory_layout.setContentsMargins(0, 0, 0, 0)
-        
-        owned_rewards_by_type = self.build_owned_rewards_by_type()
-        
-        for reward_type, section_title in INVENTORY_SECTIONS:
-            if reward_type in owned_rewards_by_type:
-                self.add_inventory_section(reward_type, section_title, owned_rewards_by_type[reward_type])
-        
-        # Show message if no items owned
-        if not self._category_sections:
-            no_items_label = QLabel("No items in inventory yet.\nVisit the Shop to purchase items!")
-            no_items_label.setStyleSheet("""
-                font-size: 16px;
-                color: #888888;
-                text-align: center;
-                padding: 40px;
-            """)
-            no_items_label.setAlignment(Qt.AlignCenter)
-            self.inventory_layout.addWidget(no_items_label)
-        
-        scroll.setWidget(content)
-        content_layout.addWidget(scroll)
-        
+        self.catalog_browser = CatalogBrowser(
+            self, entries=self._inventory_entries(), sections=INVENTORY_SECTIONS,
+            row_factory=self._inventory_catalog_row, icon_dir=IMAGES_DIR / "catalog_categories",
+            inventory=True, extras=self._inventory_category_extras)
+        self.inventory_scroll = self.catalog_browser.scroll
+        self.inventory_layout = self.catalog_browser.items_layout
+        self.owned_label = owned_label
+        content_layout.addWidget(self.catalog_browser, 1)
+
         # Add content widget to main layout
         self.layout.addWidget(content_widget)
         
@@ -2665,6 +2501,27 @@ class InventoryDialog(QDialog):
         self.title_bar.mousePressEvent = self.title_bar_mouse_press
         self.title_bar.mouseMoveEvent = self.title_bar_mouse_move
 
+
+    def _inventory_entries(self):
+        entries = [(key, {**reward, "display_name": get_reward_display_name(key, reward)})
+                   for values in self.build_owned_rewards_by_type().values() for key, reward in values]
+        if custom_wallpaper_exists(self.user_data):
+            entries.append((CUSTOM_WALLPAPER_ID, REWARDS[CUSTOM_WALLPAPER_ID]))
+        return inventory_order(entries, self.user_data)
+
+    def _inventory_catalog_row(self, reward_id, reward):
+        return self.custom_wallpaper_row() if reward_id == CUSTOM_WALLPAPER_ID else self.inventory_item_row(reward_id, reward)
+
+    def _inventory_category_extras(self, reward_type):
+        if reward_type == 'header' and not custom_wallpaper_exists(self.user_data):
+            return [self.custom_wallpaper_row()]
+        if reward_type == 'badge':
+            return [self.visual_setting_row('focus_mode', 'Focus Mode',
+                        'Hide the center badge or Silcrow in full view so the wallpaper can take the stage.'),
+                    self.visual_setting_row('quiet_run_mode', 'Quiet Run Mode',
+                        'Hide the decorative run message and cat animation while automation is active.')]
+        return []
+
     def build_owned_rewards_by_type(self):
         """Group owned rewards for Inventory while keeping custom wallpaper separate."""
         owned_rewards_by_type = defaultdict(list)
@@ -2678,97 +2535,16 @@ class InventoryDialog(QDialog):
         owned_rewards_by_type.setdefault("badge", [])
         return owned_rewards_by_type
 
-    def add_inventory_section(self, reward_type, section_title, entries):
-        """Add one collapsible Inventory category section."""
-        entries = _equipped_first(entries, self.user_data)
-        custom_wallpaper_imported = custom_wallpaper_exists(self.user_data)
-        custom_wallpaper_equipped = (
-            reward_type == "header"
-            and self.user_data.get('equipped', {}).get("header") == CUSTOM_WALLPAPER_ID
-        )
-        item_count = len(entries)
-        if reward_type == "header" and custom_wallpaper_imported:
-            item_count += 1
-        section_frame = QFrame()
-        section_frame.setObjectName("CatalogSection")
-        section_frame.setStyleSheet(_catalog_section_style())
-        section_layout = QVBoxLayout(section_frame)
-        section_layout.setSpacing(8)
-        section_layout.setContentsMargins(8, 8, 8, 8)
 
-        header_frame, action_label = _create_catalog_category_header(
-            reward_type,
-            section_title,
-            item_count,
-            True,
-            self.toggle_category,
-        )
-        section_layout.addWidget(header_frame)
-
-        items_widget = QWidget()
-        items_layout = QVBoxLayout(items_widget)
-        items_layout.setSpacing(8)
-        items_layout.setContentsMargins(0, 0, 0, 0)
-        if reward_type == "header" and custom_wallpaper_equipped:
-            items_layout.addLayout(self.custom_wallpaper_row())
-        if reward_type == "badge":
-            items_layout.addLayout(self.visual_setting_row(
-                "focus_mode",
-                "Focus Mode",
-                "Hide the center badge or Silcrow in full view so the wallpaper can take the stage.",
-            ))
-            items_layout.addLayout(self.visual_setting_row(
-                "quiet_run_mode",
-                "Quiet Run Mode",
-                "Hide the decorative run message and cat animation while automation is active.",
-            ))
-        for reward_id, reward in entries:
-            items_layout.addLayout(self.inventory_item_row(reward_id, reward))
-        if reward_type == "header" and not custom_wallpaper_equipped:
-            items_layout.addLayout(self.custom_wallpaper_row())
-        items_layout.addLayout(self.unequip_row(reward_type))
-        items_widget.setVisible(False)
-        section_layout.addWidget(items_widget)
-
-        self._category_sections[reward_type] = {
-            "frame": section_frame,
-            "header": header_frame,
-            "action": action_label,
-            "items": items_widget,
-            "title": section_title,
-        }
-        self.inventory_layout.addWidget(section_frame)
 
     def toggle_category(self, reward_type):
-        """Open one category at a time; clicking the open one closes it."""
-        next_category = None if self._expanded_category == reward_type else reward_type
-        self.apply_category_expansion(next_category)
+        self.apply_category_expansion(None if self._expanded_category == reward_type else reward_type)
 
     def apply_category_expansion(self, reward_type, scroll=True):
-        """Apply the accordion state after a click or content refresh."""
-        self._expanded_category = reward_type if reward_type in self._category_sections else None
-        for key, section in self._category_sections.items():
-            expanded = key == self._expanded_category
-            section["items"].setVisible(expanded)
-            section["header"].setStyleSheet(_catalog_category_header_style(key, expanded))
-            section["action"].setText(_catalog_category_action_text(expanded))
-        if scroll and self._expanded_category:
-            self.scroll_to_category_first_item(self._expanded_category)
+        self.catalog_browser.open_category(reward_type)
 
     def scroll_to_category_first_item(self, reward_type):
-        """Move the opened Inventory category so its first item is visible."""
-        def do_scroll():
-            section = self._category_sections.get(reward_type)
-            scroll = getattr(self, "inventory_scroll", None)
-            if not section or not scroll or not section["items"].isVisible():
-                return
-            content = scroll.widget()
-            if not content:
-                return
-            y = section["items"].mapTo(content, QPoint(0, 0)).y()
-            scroll.verticalScrollBar().setValue(max(0, y - 8))
-
-        QTimer.singleShot(40, do_scroll)
+        self.catalog_browser.open_category(reward_type)
 
     def visual_setting_row(self, setting_key, title, description):
         """Create a non-item toggle row for badge/display behavior."""
@@ -2990,6 +2766,8 @@ class InventoryDialog(QDialog):
             box.exec_()
             self.refresh()
             return
+        if self.user_data.get('equipped', {}).get('header') != CUSTOM_WALLPAPER_ID:
+            record_usage(self.user_data, CUSTOM_WALLPAPER_ID)
         self.user_data.setdefault('equipped', {})["header"] = CUSTOM_WALLPAPER_ID
         self.user_data = save_user_rewards(self.user_data)
         logging.info(
@@ -3159,6 +2937,8 @@ class InventoryDialog(QDialog):
         logging.info(f"Equiped item: {reward_id}")
         reward = REWARDS[reward_id]
         logging.info(f"Reward details: {reward}")
+        if self.user_data.get('equipped', {}).get(reward['type']) != reward_id:
+            record_usage(self.user_data, reward_id)
         self.user_data['equipped'][reward['type']] = reward_id
         logging.info(f"Updated equipped item: {self.user_data['equipped']}")
         save_user_rewards(self.user_data)
@@ -3197,8 +2977,10 @@ class InventoryDialog(QDialog):
 
     def launch_game(self, reward_id):
         """Launch a game"""
-        reward = REWARDS[reward_id]
-        if reward_id in {'game_tetris', 'game_archivebound'}:
+        reward = REWARDS.get(reward_id)
+        if not reward:
+            return
+        if reward_id == 'game_tetris' or reward.get('launch_module'):
             # Import TetrisGame lazily to avoid circular import issues
             # (pyqt_tetris imports from pyqt_dialogs)
             try:
@@ -3206,47 +2988,39 @@ class InventoryDialog(QDialog):
                     from .pyqt_tetris import TetrisGame
                     game_window = TetrisGame()
                 else:
-                    from .rpg import ArchiveboundWindow
-                    game_window = ArchiveboundWindow(host_window=self.parent())
+                    from importlib import import_module
+                    game_class = getattr(import_module(reward['launch_module']), reward['launch_class'])
+                    game_window = game_class(host_window=self.parent())
             except ImportError as e:
                 logging.exception("Failed to import game %s", reward_id)
                 QMessageBox.warning(self, "Error", f"Failed to load {reward['name']}. Please check the installation.")
                 return
 
-            # Retain the window on the dialog so Python does not collect it.
-            self.game_window = game_window
-            # Store reference to the game window for focus management after dialog closes
-            # Use QTimer to ensure proper window stacking order
-            def bring_game_to_front():
-                # Minimize the main GUI window to give focus to the game
-                if self.parent():
-                    self.parent().showMinimized()
-                
-                game_window.show()
-                game_window.raise_()
-                game_window.activateWindow()
-                # Ensure the game window gets focus and can receive keyboard events
-                game_window.setFocus()
-                game_window.setFocusPolicy(Qt.StrongFocus)
-                # Force the window to be on top
-                game_window.setWindowState(game_window.windowState() & ~Qt.WindowMinimized)
-                game_window.showNormal()
-                # Additional force to front
-                game_window.raise_()
-                game_window.activateWindow()
-            
-            # Use a small delay to ensure proper window management
-            QTimer.singleShot(50, bring_game_to_front)
-            
-            # Close the inventory dialog and then force focus to game after dialog is closed
-            def close_and_focus():
-                self.accept()
-                # Force focus to game window after dialog is completely closed
-                QTimer.singleShot(200, lambda: game_window.setFocus())
-                QTimer.singleShot(300, lambda: game_window.activateWindow())
-                QTimer.singleShot(400, lambda: game_window.setFocus())
-            
-            QTimer.singleShot(100, close_and_focus)
+            record_usage(self.user_data, reward_id)
+            save_user_rewards(self.user_data)
+            # Keep games alive after this delete-on-close Inventory dialog goes away.
+            registry = getattr(QApplication.instance(), '_autorouter_game_windows', None)
+            if registry is None:
+                registry = {}
+                QApplication.instance()._autorouter_game_windows = registry
+            game_key = id(game_window)
+            registry[game_key] = game_window
+            game_window.setAttribute(Qt.WA_DeleteOnClose, True)
+            game_window.destroyed.connect(lambda _=None, key=game_key: registry.pop(key, None))
+            host = self.parent()
+            self.accept()
+            if host:
+                host.showMinimized()
+            game_window.showNormal()
+            game_window.raise_()
+            game_window.activateWindow()
+            game_window.setFocus()
+            # The timer belongs to the game, so closing it promptly cancels focus work.
+            focus_timer = QTimer(game_window)
+            focus_timer.setSingleShot(True)
+            focus_timer.timeout.connect(game_window.setFocus)
+            focus_timer.start(50)
+
         else:
             box = self.create_styled_message_box("Game Launch", f"Launching {reward['name']}...")
             box.exec_()
@@ -3263,25 +3037,8 @@ class InventoryDialog(QDialog):
         return ModernMessageBox(title, message, msg_type, self)
 
     def focus_inventory_reward(self):
-        """Scroll Inventory to a specific reward row after the dialog renders."""
-        reward_id = getattr(self, 'focus_reward_id', None)
-        reward = REWARDS.get(reward_id, {})
-        reward_type = reward.get("type")
-        if reward_type and self._expanded_category != reward_type:
-            self.apply_category_expansion(reward_type)
-            QApplication.processEvents()
-
-        target = self._inventory_rows.get(reward_id)
-        if not reward_id or not target or not hasattr(self, 'inventory_scroll'):
-            return
-
-        QApplication.processEvents()
-        content = self.inventory_scroll.widget()
-        if not content:
-            return
-
-        y = target.mapTo(content, QPoint(0, 0)).y()
-        self.inventory_scroll.verticalScrollBar().setValue(max(0, y - 24))
+        if self.focus_reward_id:
+            self.catalog_browser.focus_reward(self.focus_reward_id)
 
     def clear_layout(self, layout):
         """Clear all widgets and sub-layouts from a layout"""
@@ -3303,49 +3060,18 @@ class InventoryDialog(QDialog):
         layout.update()
 
     def refresh(self):
-        """Refresh the inventory display"""
-        expanded_category = self._expanded_category
-        # Reload user data
+        desired_category = self._expanded_category
         self.user_data = load_user_rewards()
         self.catalog_font_family = _catalog_font_family(self.parent())
         self.setFont(QFont(self.catalog_font_family, 10))
         self.setStyleSheet(_catalog_dialog_style(self.catalog_font_family))
-        
-        # Remove and rebuild inventory list
-        self.clear_layout(self.inventory_layout)
         self._inventory_rows = {}
-        self._category_sections = {}
-        self._expanded_category = None
-        
-        owned_rewards_by_type = self.build_owned_rewards_by_type()
-        
-        for reward_type, section_title in INVENTORY_SECTIONS:
-            if reward_type in owned_rewards_by_type:
-                self.add_inventory_section(reward_type, section_title, owned_rewards_by_type[reward_type])
-        
-        # Show message if no items owned
-        if not self._category_sections:
-            no_items_label = QLabel("No items in inventory yet.\nVisit the Shop to purchase items!")
-            no_items_label.setStyleSheet("""
-                font-size: 16px;
-                color: #888888;
-                text-align: center;
-                padding: 40px;
-            """)
-            no_items_label.setAlignment(Qt.AlignCenter)
-            self.inventory_layout.addWidget(no_items_label)
-        
-        # Force the dialog to update and repaint
-        self.update()
-        self.repaint()
-        # Force layout update
-        self.inventory_layout.update()
-        # Process events to ensure UI updates
-        QApplication.processEvents()
-        if expanded_category:
-            self.apply_category_expansion(expanded_category)
+        self.owned_label.setText(f"OWNED ITEMS: {len(self.user_data.get('unlocked', []))}")
+        self.catalog_browser.refresh(self._inventory_entries())
+        if desired_category and desired_category != self.catalog_browser.category:
+            self.catalog_browser.open_category(desired_category)
         if self.focus_reward_id:
-            QTimer.singleShot(80, self.focus_inventory_reward)
+            self.catalog_browser.focus_reward(self.focus_reward_id)
 
     def eventFilter(self, obj, event):
         if hasattr(obj, '_preview_path') or hasattr(obj, '_reward'):
